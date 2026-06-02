@@ -1,0 +1,10 @@
+{
+  "kind": "config",
+  "root": "/Users/example/career-ops",
+  "firecrawl": {
+    "keys": 0,
+    "cooling_down": 0,
+    "queue_len": 0,
+    "dormant": true
+  }
+}

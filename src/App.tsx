@@ -1,15 +1,23 @@
 import { useState } from "react";
 import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
+// All IPC goes through ipc.ts — do NOT import invoke directly here.
+import { readApplications } from "./lib/ipc";
 
 function App() {
   const [greetMsg, setGreetMsg] = useState("");
   const [name, setName] = useState("");
 
   async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+    // Placeholder: in a real implementation this would call a named ipc wrapper.
+    // Using readApplications as a stand-in to exercise the IPC layer from the UI.
+    void name;
+    try {
+      const resp = await readApplications();
+      setGreetMsg(resp.content.slice(0, 80) || "No applications yet.");
+    } catch {
+      setGreetMsg("Not connected to backend.");
+    }
   }
 
   return (

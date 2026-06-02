@@ -598,6 +598,59 @@ pub fn dispatch(
             spawn_node(&app, &registry, &paths_state, &args)
         }
 
+        // --- Phase 5 (Lane B): the sanctioned QueueUrl write (P5-T4) ---
+        Command::QueueUrl { url } => {
+            crate::validate::validate_url(&url)?;
+            let duplicate = writes::queue_url(&paths_state.root, &url)?;
+            Ok(CommandResponse::WriteOk { duplicate })
+        }
+
+        // --- Phase 5: Firecrawl key management + run (P5-T5/T6) ---
+        Command::FirecrawlAddKey { key } => {
+            let duplicate = writes::firecrawl_add_key(&paths_state.root, &key)?;
+            Ok(CommandResponse::WriteOk { duplicate })
+        }
+        Command::FirecrawlRemoveKey { index } => {
+            writes::firecrawl_remove_key(&paths_state.root, index)?;
+            Ok(CommandResponse::WriteOk { duplicate: false })
+        }
+        Command::FirecrawlStatus => {
+            let count = writes::firecrawl_keys(&paths_state.root)?.len() as u32;
+            Ok(CommandResponse::FirecrawlStatus {
+                status: FirecrawlStatusDto {
+                    keys: count,
+                    cooling_down: 0,
+                    queue_len: 0,
+                    dormant: count == 0,
+                },
+            })
+        }
+        // FirecrawlEnqueue RUNS the existing Node scraper (firecrawl-probe.mjs),
+        // which reads `.env.firecrawl` and appends to pipeline.md itself. We only
+        // gate on "at least one key configured" and spawn it (cwd = repo root,
+        // hydrated env so `node` + the keys resolve). A single validated
+        // `--company` arg is forwarded when exactly one URL/company is supplied;
+        // otherwise the probe runs over all unknown companies.
+        Command::FirecrawlEnqueue { urls } => {
+            let keys = writes::firecrawl_keys(&paths_state.root)?;
+            if keys.is_empty() {
+                return Err(CommandError::new(
+                    ErrorCode::InvalidArg,
+                    "no Firecrawl keys configured",
+                ));
+            }
+            let mut args = vec!["firecrawl-probe.mjs".to_string()];
+            // The probe takes `--company NAME`, not raw URLs. When exactly one
+            // value is supplied, forward it as a validated company filter; with
+            // zero or many, run the probe over all unknown companies.
+            if urls.len() == 1 {
+                let company = validate_company(&urls[0])?;
+                args.push("--company".to_string());
+                args.push(company);
+            }
+            spawn_node(&app, &registry, &paths_state, &args)
+        }
+
         // --- Phase 5 (Lane B): headless eval of a URL ---
         Command::EvaluateUrl { url } => {
             crate::validate::validate_url(&url)?;

@@ -208,8 +208,8 @@ export function firecrawlStatus(): Promise<Extract<CommandResponse, { kind: 'fir
   return dispatch<Extract<CommandResponse, { kind: 'firecrawl_status' }>>({ cmd: 'firecrawl_status' });
 }
 
-export function firecrawlEnqueue(urls: string[]): Promise<Extract<CommandResponse, { kind: 'write_ok' }>> {
-  return dispatch<Extract<CommandResponse, { kind: 'write_ok' }>>({ cmd: 'firecrawl_enqueue', urls });
+export function firecrawlEnqueue(urls: string[]): Promise<Extract<CommandResponse, { kind: 'job_started' }>> {
+  return dispatch<Extract<CommandResponse, { kind: 'job_started' }>>({ cmd: 'firecrawl_enqueue', urls });
 }
 
 // -- Queue --

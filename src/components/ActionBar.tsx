@@ -4,6 +4,9 @@
  * Calls ipc.ts wrappers only (never invoke directly).
  * On success, calls startTracking() from jobs.ts and signals the parent to
  * open the console drawer via onJobStarted().
+ *
+ * Phase 5: adds QueueUrlButton (inline) and a "Firecrawl" toggle that opens
+ * FirecrawlPanel. The existing props contract (onJobStarted) is preserved.
  */
 
 import { useState } from 'react';
@@ -17,6 +20,8 @@ import {
   evaluateUrl,
 } from '../lib/ipc';
 import { startTracking } from '../lib/jobs';
+import { QueueUrlButton } from './QueueUrlButton';
+import { FirecrawlPanel } from './FirecrawlPanel';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -89,6 +94,7 @@ export function ActionBar({ onJobStarted }: ActionBarProps): React.ReactElement 
   const [evalUrl, setEvalUrl] = useState('');
   const [evalError, setEvalError] = useState<string | null>(null);
   const [evalRunning, setEvalRunning] = useState(false);
+  const [firecrawlOpen, setFirecrawlOpen] = useState(false);
 
   async function fireJob(
     key: string,
@@ -127,6 +133,13 @@ export function ActionBar({ onJobStarted }: ActionBarProps): React.ReactElement 
   }
 
   return (
+    <>
+    {firecrawlOpen && (
+      <FirecrawlPanel
+        onClose={() => setFirecrawlOpen(false)}
+        onJobStarted={onJobStarted}
+      />
+    )}
     <div className="flex-shrink-0 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 px-3 py-1.5">
       <div className="flex flex-wrap items-center gap-1.5">
         {/* --- Scan group --- */}
@@ -238,7 +251,31 @@ export function ActionBar({ onJobStarted }: ActionBarProps): React.ReactElement 
             </span>
           )}
         </div>
+
+        <div className="w-px h-4 bg-gray-300 dark:bg-gray-700" aria-hidden="true" />
+
+        {/* --- Queue URL --- */}
+        <QueueUrlButton />
+
+        <div className="w-px h-4 bg-gray-300 dark:bg-gray-700" aria-hidden="true" />
+
+        {/* --- Firecrawl panel toggle --- */}
+        <button
+          type="button"
+          onClick={() => setFirecrawlOpen((o) => !o)}
+          title="Firecrawl — manage API keys and trigger long-tail scraping"
+          className={[
+            'inline-flex items-center px-2.5 py-1 rounded text-xs font-medium transition-colors',
+            'border',
+            firecrawlOpen
+              ? 'border-violet-500 dark:border-violet-400 bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-300'
+              : 'border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer',
+          ].join(' ')}
+        >
+          Firecrawl
+        </button>
       </div>
     </div>
+    </>
   );
 }

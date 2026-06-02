@@ -8,11 +8,13 @@
 pub mod commands;
 pub mod env;
 pub mod paths;
+pub mod sidecar;
 pub mod validate;
 pub mod writes;
 
 use commands::ConfigBase;
 use paths::AppPaths;
+use sidecar::JobRegistry;
 use std::path::PathBuf;
 
 /// Resolve the repo root at startup, holding it (plus a fallback) in `AppPaths`.
@@ -57,9 +59,22 @@ pub fn run() {
 
             app.manage(app_paths);
             app.manage(ConfigBase(config_base));
+            // The async job engine's registry (P3-T2). Held in managed state so
+            // `dispatch` (cancel_job) and the exit hook can reach it.
+            app.manage(JobRegistry::new());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![commands::dispatch])
+        .on_window_event(|window, event| {
+            // App-exit hook: when the last window is destroyed, kill every live
+            // job so no spawned child outlives the GUI (no orphans).
+            if let tauri::WindowEvent::Destroyed = event {
+                use tauri::Manager;
+                if let Some(registry) = window.app_handle().try_state::<JobRegistry>() {
+                    registry.kill_all();
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

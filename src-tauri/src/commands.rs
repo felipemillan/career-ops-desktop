@@ -267,6 +267,21 @@ pub fn handle(
         Command::ReadScanHistory => read_scan_history(app_paths),
         Command::ListReports => list_reports(app_paths),
         Command::ReadReport { id } => read_report(app_paths, &id),
+        // --- Phase 5: the sanctioned UpdateStatus write (P5-T2) ---
+        Command::UpdateStatus {
+            app_number,
+            status,
+            notes,
+        } => {
+            // Validate inputs through the P5-T1 choke point. `status` is already
+            // a closed `CanonicalStatus` off the wire; re-run it through
+            // `validate_status` so the single validated value is what reaches the
+            // writer (defense in depth: the label round-trips exactly).
+            crate::validate::validate_app_number(app_number)?;
+            let status = crate::validate::validate_status(status.label())?;
+            writes::update_status(&app_paths.root, app_number, status, notes)?;
+            Ok(CommandResponse::WriteOk { duplicate: false })
+        }
         // Everything else is declared but not implemented in Phase 1.
         _ => Err(CommandError::not_implemented()),
     }
@@ -498,13 +513,26 @@ fn read_report(app_paths: &AppPaths, id: &str) -> Result<CommandResponse, Comman
 
 /// The single allowlisted Tauri command. The frontend invokes `dispatch` with a
 /// `command` payload; Rust validates and routes it.
+///
+/// Most variants route through the pure [`handle`] function. The job-control
+/// variants (`CancelJob`, and later the `Run*`/`EvaluateUrl` spawners) need the
+/// live [`JobRegistry`] / `AppHandle`, which the pure `handle` does not carry,
+/// so they are dispatched here at the Tauri layer.
 #[tauri::command]
 pub fn dispatch(
     command: Command,
     paths_state: tauri::State<'_, AppPaths>,
     config_base: tauri::State<'_, ConfigBase>,
+    registry: tauri::State<'_, crate::sidecar::JobRegistry>,
 ) -> Result<CommandResponse, CommandError> {
-    handle(command, &paths_state, &config_base.0)
+    match command {
+        // Cancel a running job's process group. Unknown ids are a no-op Ok.
+        Command::CancelJob { job_id } => {
+            registry.cancel(&job_id)?;
+            Ok(CommandResponse::WriteOk { duplicate: false })
+        }
+        other => handle(other, &paths_state, &config_base.0),
+    }
 }
 
 /// Managed state holding the base dir under which `config.json` lives.

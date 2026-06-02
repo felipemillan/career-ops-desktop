@@ -27,10 +27,13 @@ interface LauncherButton {
   payload: string;
 }
 
+// Buttons seed real shell commands (the terminal runs in the career-ops repo).
+// Note: `/career-ops` is a Claude Code slash command — run `claude` first, then
+// type it inside the Claude session (so it's not a standalone button here).
 const LAUNCHERS: LauncherButton[] = [
   { label: 'claude', payload: 'claude\n' },
-  { label: '/career-ops', payload: '/career-ops\n' },
   { label: 'scan', payload: 'node scan.mjs\n' },
+  { label: 'clear', payload: 'clear\n' },
 ];
 
 // ---------------------------------------------------------------------------

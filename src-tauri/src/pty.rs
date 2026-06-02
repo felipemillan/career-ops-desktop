@@ -169,6 +169,7 @@ fn pick_shell() -> String {
 pub fn pty_open(
     app: tauri::AppHandle,
     state: tauri::State<'_, PtyRegistry>,
+    config_base: tauri::State<'_, crate::commands::ConfigBase>,
     cols: u16,
     rows: u16,
 ) -> Result<String, String> {
@@ -198,6 +199,18 @@ pub fn pty_open(
     // login env didn't export one (GUI launch often omits it).
     if !hydrated.vars.contains_key("TERM") {
         cmd.env("TERM", "xterm-256color");
+    }
+
+    // Start the terminal IN the career-ops repo (so scan/merge/claude operate on
+    // it). Re-resolve live (env → config.json → default) so a root the user just
+    // picked takes effect without a restart; fall back to home if none is valid.
+    let env_root = std::env::var("CAREER_OPS_PATH").ok();
+    if let Ok(root) =
+        crate::paths::resolve_repo_root(env_root.as_deref(), &config_base.0, &config_base.0)
+    {
+        if crate::paths::is_valid_root(&root) {
+            cmd.cwd(&root);
+        }
     }
 
     let mut child = pair

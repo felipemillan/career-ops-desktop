@@ -25,6 +25,9 @@ const ScanTab = lazy(() =>
 const AnalyticsTab = lazy(() =>
   import("./tabs/AnalyticsTab").then((m) => ({ default: m.AnalyticsTab })),
 );
+const TerminalTab = lazy(() =>
+  import("./tabs/TerminalTab").then((m) => ({ default: m.TerminalTab })),
+);
 
 function App() {
   const [active, setActive] = useState<TabId>("applications");
@@ -50,12 +53,13 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const panes: Record<Exclude<TabId, "terminal">, React.ReactNode> = {
+  const panes: Record<TabId, React.ReactNode> = {
     applications: <Applications />,
     pipeline: <PipelineTab />,
     reports: <ReportsTab />,
     scan: <ScanTab />,
     analytics: <AnalyticsTab />,
+    terminal: <TerminalTab />,
   };
 
   return (

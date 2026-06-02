@@ -25,5 +25,5 @@ export const TABS: TabDef[] = [
   { id: "reports", label: "Reports", shortcut: "3" },
   { id: "scan", label: "Scan History", shortcut: "4" },
   { id: "analytics", label: "Analytics", shortcut: "5" },
-  { id: "terminal", label: "Terminal", disabled: true },
+  { id: "terminal", label: "Terminal", shortcut: "6" },
 ];

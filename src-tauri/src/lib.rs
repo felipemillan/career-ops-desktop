@@ -8,12 +8,14 @@
 pub mod commands;
 pub mod env;
 pub mod paths;
+pub mod pty;
 pub mod sidecar;
 pub mod validate;
 pub mod writes;
 
 use commands::ConfigBase;
 use paths::AppPaths;
+use pty::PtyRegistry;
 use sidecar::JobRegistry;
 use std::path::PathBuf;
 
@@ -62,16 +64,30 @@ pub fn run() {
             // The async job engine's registry (P3-T2). Held in managed state so
             // `dispatch` (cancel_job) and the exit hook can reach it.
             app.manage(JobRegistry::new());
+            // The PTY (embedded terminal) registry (P4-T1). Held in managed state
+            // so the pty_* commands and the exit hook can reach it.
+            app.manage(PtyRegistry::new());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![commands::dispatch])
+        .invoke_handler(tauri::generate_handler![
+            commands::dispatch,
+            pty::pty_open,
+            pty::pty_write,
+            pty::pty_resize,
+            pty::pty_kill,
+        ])
         .on_window_event(|window, event| {
             // App-exit hook: when the last window is destroyed, kill every live
-            // job so no spawned child outlives the GUI (no orphans).
+            // job AND every live PTY so no spawned child / terminal outlives the
+            // GUI (no orphans).
             if let tauri::WindowEvent::Destroyed = event {
                 use tauri::Manager;
-                if let Some(registry) = window.app_handle().try_state::<JobRegistry>() {
+                let app = window.app_handle();
+                if let Some(registry) = app.try_state::<JobRegistry>() {
                     registry.kill_all();
+                }
+                if let Some(pty_registry) = app.try_state::<PtyRegistry>() {
+                    pty_registry.kill_all();
                 }
             }
         })

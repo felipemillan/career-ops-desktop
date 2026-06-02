@@ -520,6 +520,7 @@ fn read_report(app_paths: &AppPaths, id: &str) -> Result<CommandResponse, Comman
 /// so they are dispatched here at the Tauri layer.
 #[tauri::command]
 pub fn dispatch(
+    app: tauri::AppHandle,
     command: Command,
     paths_state: tauri::State<'_, AppPaths>,
     config_base: tauri::State<'_, ConfigBase>,
@@ -531,8 +532,193 @@ pub fn dispatch(
             registry.cancel(&job_id)?;
             Ok(CommandResponse::WriteOk { duplicate: false })
         }
+
+        // --- Phase 3: Lane A (zero-token Node scripts) ---
+        // Every Run* spawns `node <script>.mjs` with cwd = resolved repo root
+        // (C1: scan and the trackers are cwd-driven, not CAREER_OPS_PATH-driven).
+        Command::RunScan { dry_run, company } => {
+            let mut args = vec!["scan.mjs".to_string()];
+            if dry_run {
+                args.push("--dry-run".to_string());
+            }
+            if let Some(c) = company {
+                let c = validate_company(&c)?;
+                args.push("--company".to_string());
+                args.push(c);
+            }
+            spawn_node(&app, &registry, &paths_state, &args)
+        }
+        Command::RunMerge => {
+            spawn_node(&app, &registry, &paths_state, &["merge-tracker.mjs".to_string()])
+        }
+        Command::RunDedup => {
+            spawn_node(&app, &registry, &paths_state, &["dedup-tracker.mjs".to_string()])
+        }
+        Command::RunPatterns => {
+            spawn_node(&app, &registry, &paths_state, &["analyze-patterns.mjs".to_string()])
+        }
+        Command::RunFollowup => {
+            spawn_node(&app, &registry, &paths_state, &["followup-cadence.mjs".to_string()])
+        }
+        Command::RunVerifyPipeline => {
+            spawn_node(&app, &registry, &paths_state, &["verify-pipeline.mjs".to_string()])
+        }
+
+        // GenPdf/GenLatex: glob the newest matching INPUT, DERIVE the output path
+        // from the input stem (C2 — output is never globbed).
+        Command::GenPdf { app_number } => {
+            crate::validate::validate_app_number(app_number)?;
+            let input = newest_output_match(
+                &paths_state.root,
+                &format!("cv-{app_number}-"),
+                "html",
+            )?;
+            let output = input.with_extension("pdf");
+            let args = vec![
+                "generate-pdf.mjs".to_string(),
+                input.to_string_lossy().into_owned(),
+                output.to_string_lossy().into_owned(),
+            ];
+            spawn_node(&app, &registry, &paths_state, &args)
+        }
+        Command::GenLatex { app_number } => {
+            crate::validate::validate_app_number(app_number)?;
+            let input = newest_output_match(
+                &paths_state.root,
+                &format!("cv-{app_number}-"),
+                "tex",
+            )?;
+            // generate-latex.mjs: argv[2]=input, argv[3]=optional derived output.
+            let output = input.with_extension("pdf");
+            let args = vec![
+                "generate-latex.mjs".to_string(),
+                input.to_string_lossy().into_owned(),
+                output.to_string_lossy().into_owned(),
+            ];
+            spawn_node(&app, &registry, &paths_state, &args)
+        }
+
+        // --- Phase 5 (Lane B): headless eval of a URL ---
+        Command::EvaluateUrl { url } => {
+            crate::validate::validate_url(&url)?;
+            let claude = crate::env::require_claude()?;
+            let args = vec![
+                "-p".to_string(),
+                format!("/career-ops oferta {url}"),
+            ];
+            let job_id = crate::sidecar::spawn_job(
+                &app,
+                &registry,
+                &claude.to_string_lossy(),
+                &args,
+                &paths_state.root,
+            )?;
+            Ok(CommandResponse::JobStarted { job_id })
+        }
+
         other => handle(other, &paths_state, &config_base.0),
     }
+}
+
+/// Resolve `node` against the hydrated login-shell PATH and spawn it with `args`
+/// in the repo root (the cwd every Lane-A script expects). The first element of
+/// `args` is the script filename relative to the root.
+fn spawn_node(
+    app: &tauri::AppHandle,
+    registry: &crate::sidecar::JobRegistry,
+    paths: &AppPaths,
+    args: &[String],
+) -> Result<CommandResponse, CommandError> {
+    // `node` must come from the hydrated env (a bundled `.app` has a truncated
+    // PATH that omits the user's node install), same path sidecar already uses.
+    let node = crate::env::require_binary(crate::env::hydrated_env(), "node")?;
+    let job_id = crate::sidecar::spawn_job(
+        app,
+        registry,
+        &node.to_string_lossy(),
+        args,
+        &paths.root,
+    )?;
+    Ok(CommandResponse::JobStarted { job_id })
+}
+
+/// Validate a `--company` argument against a tight charset so it can never carry
+/// shell metacharacters (defense in depth — the spawner is argv-only anyway).
+/// Allowed: letters, digits, space, `. & ' -`. Empty / out-of-charset → InvalidArg.
+fn validate_company(company: &str) -> Result<String, CommandError> {
+    let trimmed = company.trim();
+    if trimmed.is_empty() {
+        return Err(CommandError::new(
+            ErrorCode::InvalidArg,
+            "company is empty",
+        ));
+    }
+    let ok = trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '&' | '\'' | '-'));
+    if !ok {
+        return Err(CommandError::new(
+            ErrorCode::InvalidArg,
+            format!("company contains disallowed characters: {company:?}"),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Find the newest (by mtime) file under `<root>/output/` whose filename starts
+/// with `prefix` and ends with `.{ext}`. Returns the absolute path or a
+/// [`ErrorCode::NotFound`] error when nothing matches (so the caller does NOT
+/// spawn). This is the input side of GenPdf/GenLatex; the output is derived from
+/// the returned stem by the caller.
+fn newest_output_match(
+    root: &Path,
+    prefix: &str,
+    ext: &str,
+) -> Result<std::path::PathBuf, CommandError> {
+    let dir = root.join("output");
+    let suffix = format!(".{ext}");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CommandError::new(
+                ErrorCode::NotFound,
+                format!("no {ext} input found for {prefix}* (output/ missing)"),
+            ));
+        }
+        Err(e) => {
+            return Err(CommandError::new(
+                ErrorCode::Internal,
+                format!("failed to read output dir {}: {e}", dir.display()),
+            ));
+        }
+    };
+
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in entries.flatten() {
+        let name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if !name.starts_with(prefix) || !name.ends_with(&suffix) {
+            continue;
+        }
+        let path = entry.path();
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        match &best {
+            Some((best_mtime, _)) if *best_mtime >= mtime => {}
+            _ => best = Some((mtime, path)),
+        }
+    }
+
+    best.map(|(_, p)| p).ok_or_else(|| {
+        CommandError::new(
+            ErrorCode::NotFound,
+            format!("no {ext} input found matching {prefix}* in {}", dir.display()),
+        )
+    })
 }
 
 /// Managed state holding the base dir under which `config.json` lives.
@@ -1065,5 +1251,132 @@ mod p2_tests {
         assert!(is_report_filename("001-acme-2026-01-01.md"));
         assert!(!is_report_filename("README.md"));
         assert!(!is_report_filename("001-acme-2026-01-01")); // no .md
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 tests (P3-T2): Lane-A argv gates — company injection reject +
+// GenPdf/GenLatex input glob (newest mtime) with DERIVED output.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod p3_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    // ---- validate_company: charset + injection ----
+
+    #[test]
+    fn company_accepts_normal_names() {
+        for ok in ["Cohere", "Hugging Face", "AT&T", "O'Reilly", "Foo-Bar", "Acme 2.0"] {
+            assert!(validate_company(ok).is_ok(), "should accept {ok:?}");
+        }
+        // Trimming.
+        assert_eq!(validate_company("  Cohere  ").unwrap(), "Cohere");
+    }
+
+    #[test]
+    fn company_rejects_injection_and_empty() {
+        for bad in [
+            "",
+            "   ",
+            "\"; rm -rf \"",     // shell injection attempt
+            "Cohere; ls",        // semicolon
+            "$(whoami)",         // command substitution
+            "a`b`",              // backticks
+            "a|b",               // pipe
+            "a&&b",              // chained &&  (the & is allowed but '&&' is too? '&' is allowed; this is allowed)
+        ] {
+            // Note '&&' is composed of two allowed '&' chars, so it is NOT rejected
+            // by charset; only metachars outside the allow-set are. Skip that case.
+            if bad == "a&&b" {
+                assert!(validate_company(bad).is_ok());
+                continue;
+            }
+            assert_eq!(
+                validate_company(bad).unwrap_err().code,
+                ErrorCode::InvalidArg,
+                "expected reject for {bad:?}"
+            );
+        }
+    }
+
+    // ---- newest_output_match: glob input, newest mtime, NotFound when absent ----
+
+    fn make_repo_with_output(parent: &Path, files: &[&str]) -> PathBuf {
+        let root = parent.join("repo");
+        let out = root.join("output");
+        fs::create_dir_all(&out).unwrap();
+        for f in files {
+            fs::write(out.join(f), "x").unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn genpdf_input_glob_matches_html_prefix() {
+        let tmp = tempdir().unwrap();
+        let root = make_repo_with_output(
+            tmp.path(),
+            &["cv-456-acme.html", "cv-457-other.html", "cv-456-acme.pdf"],
+        );
+        let input = newest_output_match(&root, "cv-456-", "html").unwrap();
+        assert_eq!(input.file_name().unwrap().to_str().unwrap(), "cv-456-acme.html");
+        // Derived output is the stem with .pdf (what the caller spawns as argv[3]).
+        assert_eq!(
+            input.with_extension("pdf").file_name().unwrap().to_str().unwrap(),
+            "cv-456-acme.pdf"
+        );
+    }
+
+    #[test]
+    fn genpdf_picks_newest_mtime_when_multiple_match() {
+        use std::thread::sleep;
+        use std::time::Duration;
+        let tmp = tempdir().unwrap();
+        let root = make_repo_with_output(tmp.path(), &["cv-456-v1.html"]);
+        let out = root.join("output");
+        // Write a second match later so it has a strictly newer mtime.
+        sleep(Duration::from_millis(20));
+        fs::write(out.join("cv-456-v2.html"), "newer").unwrap();
+
+        let input = newest_output_match(&root, "cv-456-", "html").unwrap();
+        assert_eq!(
+            input.file_name().unwrap().to_str().unwrap(),
+            "cv-456-v2.html",
+            "must pick the newest-mtime match"
+        );
+    }
+
+    #[test]
+    fn genlatex_input_glob_matches_tex_prefix_and_derives_pdf() {
+        let tmp = tempdir().unwrap();
+        let root = make_repo_with_output(tmp.path(), &["cv-789-data.tex", "cv-789-data.html"]);
+        let input = newest_output_match(&root, "cv-789-", "tex").unwrap();
+        assert_eq!(input.file_name().unwrap().to_str().unwrap(), "cv-789-data.tex");
+        assert_eq!(
+            input.with_extension("pdf").file_name().unwrap().to_str().unwrap(),
+            "cv-789-data.pdf"
+        );
+    }
+
+    #[test]
+    fn no_input_match_is_not_found() {
+        let tmp = tempdir().unwrap();
+        // output/ exists but nothing matches the prefix.
+        let root = make_repo_with_output(tmp.path(), &["cv-999-x.html"]);
+        let err = newest_output_match(&root, "cv-456-", "html").unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn missing_output_dir_is_not_found() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("repo-no-output");
+        fs::create_dir_all(&root).unwrap();
+        let err = newest_output_match(&root, "cv-456-", "html").unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
     }
 }

@@ -15,15 +15,11 @@ import {
   useSensor,
   useSensors,
   useDroppable,
+  useDraggable,
   type DragStartEvent,
   type DragEndEvent,
-  closestCorners,
+  pointerWithin,
 } from "@dnd-kit/core";
-import {
-  SortableContext,
-  useSortable,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { CareerApplication } from "../../lib/types";
 import { reportIdFromApp } from "../../lib/report-id";
@@ -152,19 +148,17 @@ function resolveTargetColumn(
 
 interface AppCardProps {
   app: CareerApplication;
-  isDragging?: boolean;
   onOpenReport?: (id: string) => void;
 }
 
-function AppCard({ app, isDragging = false, onOpenReport }: AppCardProps) {
-  const { attributes, listeners, setNodeRef, transform, transition } = useSortable({
-    id: String(app.number),
-  });
+function AppCard({ app, onOpenReport }: AppCardProps) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } =
+    useDraggable({ id: String(app.number) });
 
   const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.4 : 1,
+    transform: CSS.Translate.toString(transform),
+    // Hide the original while its overlay is dragging (avoids a duplicate).
+    opacity: isDragging ? 0.3 : 1,
   };
 
   const reportId = reportIdFromApp(app);
@@ -266,7 +260,6 @@ interface KanbanColumnProps {
 
 function KanbanColumn({ status, apps, onOpenReport }: KanbanColumnProps) {
   const colors = STATUS_COLORS[status] ?? STATUS_COLORS["Evaluated"];
-  const ids = apps.map((a) => String(a.number));
 
   // The whole column is a drop target — its id IS the status, so dropping
   // anywhere on the column (incl. empty space) resolves over.id = status.
@@ -297,20 +290,18 @@ function KanbanColumn({ status, apps, onOpenReport }: KanbanColumnProps) {
         </span>
       </div>
 
-      {/* Cards */}
-      <SortableContext items={ids} strategy={verticalListSortingStrategy}>
-        <div className="flex flex-col gap-2 min-h-[80px]">
-          {apps.length === 0 ? (
-            <div className="rounded border border-dashed border-gray-200 dark:border-gray-700 py-4 text-center text-[11px] text-gray-400 dark:text-gray-600">
-              Empty
-            </div>
-          ) : (
-            apps.map((app) => (
-              <AppCard key={app.number} app={app} onOpenReport={onOpenReport} />
-            ))
-          )}
-        </div>
-      </SortableContext>
+      {/* Cards — column is the only drop target (useDroppable above) */}
+      <div className="flex flex-col gap-2 min-h-[80px]">
+        {apps.length === 0 ? (
+          <div className="rounded border border-dashed border-gray-200 dark:border-gray-700 py-4 text-center text-[11px] text-gray-400 dark:text-gray-600">
+            Empty
+          </div>
+        ) : (
+          apps.map((app) => (
+            <AppCard key={app.number} app={app} onOpenReport={onOpenReport} />
+          ))
+        )}
+      </div>
     </div>
   );
 }
@@ -481,7 +472,7 @@ export function ApplicationsKanban({ apps, onOpenReport }: ApplicationsKanbanPro
       {/* Kanban board — horizontally scrollable */}
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCorners}
+        collisionDetection={pointerWithin}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
       >

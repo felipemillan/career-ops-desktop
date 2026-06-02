@@ -26,6 +26,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { CareerApplication } from "../../lib/types";
+import { reportIdFromApp } from "../../lib/report-id";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -95,9 +96,10 @@ function groupByStatus(apps: CareerApplication[]): Record<string, CareerApplicat
 interface AppCardProps {
   app: CareerApplication;
   isDragging?: boolean;
+  onOpenReport?: (id: string) => void;
 }
 
-function AppCard({ app, isDragging = false }: AppCardProps) {
+function AppCard({ app, isDragging = false, onOpenReport }: AppCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition } = useSortable({
     id: String(app.number),
   });
@@ -107,6 +109,8 @@ function AppCard({ app, isDragging = false }: AppCardProps) {
     transition,
     opacity: isDragging ? 0.4 : 1,
   };
+
+  const reportId = reportIdFromApp(app);
 
   return (
     <div
@@ -143,6 +147,22 @@ function AppCard({ app, isDragging = false }: AppCardProps) {
       <div className="flex items-center justify-between text-[10px] tabular-nums text-gray-400 dark:text-gray-500">
         <span>#{String(app.number).padStart(3, "0")}</span>
         <span>{app.date}</span>
+        {reportId && onOpenReport && (
+          <button
+            type="button"
+            title="View report"
+            aria-label={`View report for ${app.company}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenReport(reportId);
+            }}
+            // Prevent dnd-kit from treating this as a drag start
+            onPointerDown={(e) => e.stopPropagation()}
+            className="ml-1 rounded px-1 py-0.5 text-[11px] text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-700 dark:hover:text-gray-300 transition-colors cursor-pointer"
+          >
+            📄
+          </button>
+        )}
       </div>
     </div>
   );
@@ -184,9 +204,10 @@ function OverlayCard({ app }: { app: CareerApplication }) {
 interface KanbanColumnProps {
   status: string;
   apps: CareerApplication[];
+  onOpenReport?: (id: string) => void;
 }
 
-function KanbanColumn({ status, apps }: KanbanColumnProps) {
+function KanbanColumn({ status, apps, onOpenReport }: KanbanColumnProps) {
   const colors = STATUS_COLORS[status] ?? STATUS_COLORS["Evaluated"];
   const ids = apps.map((a) => String(a.number));
 
@@ -216,7 +237,7 @@ function KanbanColumn({ status, apps }: KanbanColumnProps) {
             </div>
           ) : (
             apps.map((app) => (
-              <AppCard key={app.number} app={app} />
+              <AppCard key={app.number} app={app} onOpenReport={onOpenReport} />
             ))
           )}
         </div>
@@ -231,9 +252,10 @@ function KanbanColumn({ status, apps }: KanbanColumnProps) {
 
 interface ApplicationsKanbanProps {
   apps: CareerApplication[];
+  onOpenReport?: (id: string) => void;
 }
 
-export function ApplicationsKanban({ apps }: ApplicationsKanbanProps) {
+export function ApplicationsKanban({ apps, onOpenReport }: ApplicationsKanbanProps) {
   const columns = groupByStatus(apps);
 
   // Track which card is being dragged (for overlay)
@@ -292,6 +314,7 @@ export function ApplicationsKanban({ apps }: ApplicationsKanbanProps) {
                 key={status}
                 status={status}
                 apps={columns[status] ?? []}
+                onOpenReport={onOpenReport}
               />
             ))}
           </div>

@@ -6,7 +6,9 @@
 //! are registered with the Tauri runtime here.
 
 pub mod commands;
+pub mod env;
 pub mod paths;
+pub mod validate;
 pub mod writes;
 
 use commands::ConfigBase;

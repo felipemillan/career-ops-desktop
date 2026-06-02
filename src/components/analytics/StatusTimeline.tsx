@@ -8,9 +8,12 @@ import type { CareerApplication } from "../../lib/types";
 // ISO-week bucketing (mirrored from bucket-by-week.ts, inline)
 // ---------------------------------------------------------------------------
 
-function getISOWeekKey(dateStr: string): string | null {
+function parseValidDate(dateStr: string): Date | null {
   const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return null;
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function isoWeekKey(d: Date): string {
   const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
   const dayNum = date.getUTCDay() || 7;
   date.setUTCDate(date.getUTCDate() + 4 - dayNum);
@@ -19,10 +22,12 @@ function getISOWeekKey(dateStr: string): string | null {
   return `${date.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
 }
 
-function addWeeks(dateStr: string, n: number): string {
-  const d = new Date(dateStr + "-1"); // parse week start
-  d.setUTCDate(d.getUTCDate() + n * 7);
-  return getISOWeekKey(d.toISOString().slice(0, 10)) ?? dateStr;
+/** Monday (UTC) of the ISO week containing d — gives a clean +7-day step. */
+function mondayOfWeek(d: Date): Date {
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const dayNum = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() - (dayNum - 1));
+  return date;
 }
 
 // ---------------------------------------------------------------------------
@@ -49,14 +54,15 @@ function buildTimeline(apps: CareerApplication[]): WeekRow[] {
   if (apps.length === 0) return [];
 
   const byWeek = new Map<string, Record<string, number>>();
-  let minKey: string | null = null;
-  let maxKey: string | null = null;
+  let min: Date | null = null;
+  let max: Date | null = null;
 
   for (const app of apps) {
-    const k = getISOWeekKey(app.date);
-    if (!k) continue;
-    if (!minKey || k < minKey) minKey = k;
-    if (!maxKey || k > maxKey) maxKey = k;
+    const d = parseValidDate(app.date);
+    if (!d) continue; // skip unparseable dates instead of crashing
+    if (!min || d < min) min = d;
+    if (!max || d > max) max = d;
+    const k = isoWeekKey(d);
     const row = byWeek.get(k) ?? {};
     const status = (TRACKED_STATUSES as readonly string[]).includes(app.status)
       ? app.status
@@ -65,17 +71,20 @@ function buildTimeline(apps: CareerApplication[]): WeekRow[] {
     byWeek.set(k, row);
   }
 
-  if (!minKey || !maxKey) return [];
+  if (!min || !max) return [];
 
+  // Walk week by week with real date arithmetic (Monday cursor → clean +7 step).
+  const maxKey = isoWeekKey(max);
+  const cursor = mondayOfWeek(min);
   const result: WeekRow[] = [];
-  let cursor = minKey;
-  const maxIterations = 200; // safety guard
   let iter = 0;
-  while (cursor <= maxKey && iter++ < maxIterations) {
-    const counts = byWeek.get(cursor) ?? {};
+  while (iter++ < 400) {
+    const k = isoWeekKey(cursor);
+    const counts = byWeek.get(k) ?? {};
     const total = TRACKED_STATUSES.reduce((s, st) => s + (counts[st] ?? 0), 0);
-    result.push({ week: cursor, counts, total });
-    cursor = addWeeks(cursor, 1);
+    result.push({ week: k, counts, total });
+    if (k >= maxKey) break;
+    cursor.setUTCDate(cursor.getUTCDate() + 7);
   }
 
   return result;

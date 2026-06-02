@@ -3,15 +3,28 @@
  * Inactive tabs stay mounted with `hidden` to preserve scroll/state.
  * All IPC goes through ipc.ts — never import invoke here.
  */
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import "./App.css";
 import { Sidebar } from "./components/Sidebar";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { TABS, type TabId } from "./lib/tabs";
 import { Applications } from "./tabs/Applications";
-import { PipelineTab } from "./tabs/PipelineTab";
-import { ReportsTab } from "./tabs/ReportsTab";
-import { ScanTab } from "./tabs/ScanTab";
-import { AnalyticsTab } from "./tabs/AnalyticsTab";
+
+// Secondary tabs are lazy: their heavy deps (dnd-kit, react-markdown, charts)
+// load only when the tab is first opened — keeps launch lean and isolates
+// any per-tab load failure to that tab.
+const PipelineTab = lazy(() =>
+  import("./tabs/PipelineTab").then((m) => ({ default: m.PipelineTab })),
+);
+const ReportsTab = lazy(() =>
+  import("./tabs/ReportsTab").then((m) => ({ default: m.ReportsTab })),
+);
+const ScanTab = lazy(() =>
+  import("./tabs/ScanTab").then((m) => ({ default: m.ScanTab })),
+);
+const AnalyticsTab = lazy(() =>
+  import("./tabs/AnalyticsTab").then((m) => ({ default: m.AnalyticsTab })),
+);
 
 function App() {
   const [active, setActive] = useState<TabId>("applications");
@@ -52,7 +65,15 @@ function App() {
         {(Object.keys(panes) as Array<keyof typeof panes>).map((id) =>
           seen.has(id) ? (
             <div key={id} className={id === active ? "p-4" : "hidden"}>
-              {panes[id]}
+              <ErrorBoundary label={id}>
+                <Suspense
+                  fallback={
+                    <div className="p-8 text-sm text-gray-400">Loading {id}…</div>
+                  }
+                >
+                  {panes[id]}
+                </Suspense>
+              </ErrorBoundary>
             </div>
           ) : null,
         )}

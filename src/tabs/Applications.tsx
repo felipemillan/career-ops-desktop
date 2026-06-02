@@ -5,13 +5,19 @@
  *
  * Phase 2: adds Table / Kanban view toggle.
  */
-import { useState } from "react";
+import { Suspense, lazy, useState } from "react";
 import { type ColumnDef } from "@tanstack/react-table";
 import type { CareerApplication } from "../lib/types";
 import { useApplications } from "../lib/store";
 import { DataTable } from "../components/DataTable";
 import { RepoPicker } from "../components/RepoPicker";
-import { ApplicationsKanban } from "../components/kanban/ApplicationsKanban";
+
+// Kanban pulls in dnd-kit — load it only when the Kanban view is selected.
+const ApplicationsKanban = lazy(() =>
+  import("../components/kanban/ApplicationsKanban").then((m) => ({
+    default: m.ApplicationsKanban,
+  })),
+);
 
 // ---------------------------------------------------------------------------
 // View toggle
@@ -277,7 +283,11 @@ export function Applications() {
           defaultSorting={[{ id: "number", desc: true }]}
         />
       ) : (
-        <ApplicationsKanban apps={apps} />
+        <Suspense
+          fallback={<div className="p-8 text-sm text-gray-400">Loading kanban…</div>}
+        >
+          <ApplicationsKanban apps={apps} />
+        </Suspense>
       )}
     </div>
   );

@@ -13,6 +13,7 @@ import { ActionBar } from "./components/ActionBar";
 import { ConsolePanel } from "./components/ConsolePanel";
 import { TABS, type TabId } from "./lib/tabs";
 import { Applications } from "./tabs/Applications";
+import { track } from "./lib/analytics";
 
 // Secondary tabs are lazy: their heavy deps (dnd-kit, react-markdown, charts)
 // load only when the tab is first opened — keeps launch lean and isolates
@@ -55,6 +56,7 @@ function App() {
   const select = (id: TabId) => {
     setActive(id);
     setSeen((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+    track('tab_viewed', { tab: id });
   };
 
   // Cmd+1..6 shortcuts

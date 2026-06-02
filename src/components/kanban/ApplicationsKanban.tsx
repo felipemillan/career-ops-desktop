@@ -30,6 +30,7 @@ import { reportIdFromApp } from "../../lib/report-id";
 import { updateStatus } from "../../lib/ipc";
 import type { CanonicalStatus } from "../../lib/ipc";
 import { emitRefresh, fetchApplications } from "../../lib/store";
+import { track } from "../../lib/analytics";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -413,6 +414,8 @@ export function ApplicationsKanban({ apps, onOpenReport }: ApplicationsKanbanPro
       // --- Backend write ---
       updateStatus(appNumber, targetStatus)
         .then(() => {
+          // Track status change — status strings only, no company/number/score
+          track('status_changed', { from: currentSt, to: targetStatus });
           // Success — emit refresh so the store re-reads applications.md.
           // fetchApplications will push fresh data → useApplications() re-renders
           // → parent passes new `apps` prop → overrides for this app become redundant

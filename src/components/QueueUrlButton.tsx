@@ -10,6 +10,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { queueUrl } from '../lib/ipc';
+import { track } from '../lib/analytics';
 
 // ---------------------------------------------------------------------------
 // Toast state
@@ -61,6 +62,7 @@ export function QueueUrlButton(): React.ReactElement {
   async function handleQueue(): Promise<void> {
     if (!valid || busy) return;
     setBusy(true);
+    track('action_run', { action: 'queue_url' });
     try {
       const res = await queueUrl(trimmed);
       if (res.duplicate) {

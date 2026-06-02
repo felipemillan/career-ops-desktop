@@ -3,6 +3,7 @@
  * readable message instead of white-screening the whole app.
  */
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { captureError } from "../lib/analytics";
 
 interface Props {
   label: string;
@@ -24,6 +25,8 @@ export class ErrorBoundary extends Component<Props, State> {
     // Surface to the webview console too (visible in devtools / forwarded logs).
     console.error(`[${this.props.label}] render crash:`, error, info.componentStack);
     this.setState({ info: info.componentStack ?? "" });
+    // Send scrubbed error to PostHog — tab label only, no route/URL/data
+    captureError(error, { tab: this.props.label });
   }
 
   render() {

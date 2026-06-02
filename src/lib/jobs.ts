@@ -13,6 +13,7 @@
 
 import { listen } from '@tauri-apps/api/event';
 import { useState, useEffect } from 'react';
+import { track } from './analytics';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -161,7 +162,14 @@ export function setupListeners(): void {
 
   // job://exit
   listen<ExitPayload>('job://exit', (event) => {
-    setState(applyExit(getState(), event.payload.job_id, event.payload.code));
+    const { job_id, code } = event.payload;
+    const prevState = getState();
+    setState(applyExit(prevState, job_id, code));
+    // Track job completion — label is safe (action name), code is numeric, no output lines
+    const entry = prevState.jobs[job_id];
+    if (entry) {
+      track('job_finished', { label: entry.label, code, success: code === 0 });
+    }
   }).catch(() => {
     // Tauri not available in test/SSR environment — ignore.
   });

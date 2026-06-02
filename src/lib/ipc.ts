@@ -4,6 +4,7 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { captureError } from './analytics';
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -97,7 +98,13 @@ export type CommandError = {
 // ---------------------------------------------------------------------------
 
 async function dispatch<T extends CommandResponse>(command: Cmd): Promise<T> {
-  return invoke<T>('dispatch', { command });
+  try {
+    return await invoke<T>('dispatch', { command });
+  } catch (err) {
+    // Capture the command name only — never args (may contain url/key/path)
+    captureError(err, { cmd: command.cmd });
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------

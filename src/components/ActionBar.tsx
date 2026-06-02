@@ -20,6 +20,7 @@ import {
   evaluateUrl,
 } from '../lib/ipc';
 import { startTracking } from '../lib/jobs';
+import { track } from '../lib/analytics';
 import { QueueUrlButton } from './QueueUrlButton';
 import { FirecrawlPanel } from './FirecrawlPanel';
 
@@ -120,6 +121,7 @@ export function ActionBar({ onJobStarted }: ActionBarProps): React.ReactElement 
     if (!url) return;
     setEvalError(null);
     setEvalRunning(true);
+    track('action_run', { action: 'evaluate' });
     try {
       const res = await evaluateUrl(url);
       startTracking(res.job_id, `Evaluate: ${url}`);
@@ -147,11 +149,12 @@ export function ActionBar({ onJobStarted }: ActionBarProps): React.ReactElement 
           <ActionButton
             label="Scan"
             running={!!running['scan']}
-            onClick={() =>
-              fireJob('scan', dryRun ? 'Scan (dry run)' : 'Scan', () =>
+            onClick={() => {
+              track('action_run', { action: 'scan', dry_run: dryRun });
+              void fireJob('scan', dryRun ? 'Scan (dry run)' : 'Scan', () =>
                 runScan({ dryRun }),
-              )
-            }
+              );
+            }}
             title="Run scan.mjs — hits Greenhouse/Ashby/Lever APIs, zero LLM cost"
           />
           <label className="flex items-center gap-0.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none">
@@ -171,31 +174,46 @@ export function ActionBar({ onJobStarted }: ActionBarProps): React.ReactElement 
         <ActionButton
           label="Merge"
           running={!!running['merge']}
-          onClick={() => fireJob('merge', 'Merge tracker', () => runMerge())}
+          onClick={() => {
+            track('action_run', { action: 'merge' });
+            void fireJob('merge', 'Merge tracker', () => runMerge());
+          }}
           title="Run merge-tracker.mjs — merge batch TSV additions into applications.md"
         />
         <ActionButton
           label="Dedup"
           running={!!running['dedup']}
-          onClick={() => fireJob('dedup', 'Dedup tracker', () => runDedup())}
+          onClick={() => {
+            track('action_run', { action: 'dedup' });
+            void fireJob('dedup', 'Dedup tracker', () => runDedup());
+          }}
           title="Run dedup-tracker.mjs — remove duplicate rows in applications.md"
         />
         <ActionButton
           label="Patterns"
           running={!!running['patterns']}
-          onClick={() => fireJob('patterns', 'Analyze patterns', () => runPatterns())}
+          onClick={() => {
+            track('action_run', { action: 'patterns' });
+            void fireJob('patterns', 'Analyze patterns', () => runPatterns());
+          }}
           title="Run analyze-patterns.mjs — JSON output with rejection pattern analysis"
         />
         <ActionButton
           label="Follow-up"
           running={!!running['followup']}
-          onClick={() => fireJob('followup', 'Follow-up cadence', () => runFollowup())}
+          onClick={() => {
+            track('action_run', { action: 'followup' });
+            void fireJob('followup', 'Follow-up cadence', () => runFollowup());
+          }}
           title="Run followup-cadence.mjs — show overdue follow-ups"
         />
         <ActionButton
           label="Verify"
           running={!!running['verify']}
-          onClick={() => fireJob('verify', 'Verify pipeline', () => runVerifyPipeline())}
+          onClick={() => {
+            track('action_run', { action: 'verify' });
+            void fireJob('verify', 'Verify pipeline', () => runVerifyPipeline());
+          }}
           title="Run verify-pipeline.mjs — health check on pipeline integrity"
         />
 

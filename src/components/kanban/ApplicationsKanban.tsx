@@ -14,6 +14,7 @@ import {
   PointerSensor,
   useSensor,
   useSensors,
+  useDroppable,
   type DragStartEvent,
   type DragEndEvent,
   closestCorners,
@@ -266,8 +267,20 @@ function KanbanColumn({ status, apps, onOpenReport }: KanbanColumnProps) {
   const colors = STATUS_COLORS[status] ?? STATUS_COLORS["Evaluated"];
   const ids = apps.map((a) => String(a.number));
 
+  // The whole column is a drop target — its id IS the status, so dropping
+  // anywhere on the column (incl. empty space) resolves over.id = status.
+  const { setNodeRef, isOver } = useDroppable({ id: status });
+
   return (
-    <div className="flex flex-col shrink-0 w-60 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950 p-3">
+    <div
+      ref={setNodeRef}
+      className={[
+        "flex flex-col shrink-0 w-60 rounded-xl border p-3 transition-colors",
+        isOver
+          ? "border-blue-400 dark:border-blue-500 bg-blue-50 dark:bg-blue-950/40"
+          : "border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950",
+      ].join(" ")}
+    >
       {/* Column header */}
       <div className="flex items-center gap-2 mb-3">
         <span

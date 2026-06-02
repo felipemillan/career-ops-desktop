@@ -221,7 +221,7 @@ function buildColumns(
 
 export function Applications() {
   const { apps, loading, error } = useApplications();
-  const [viewMode, setViewMode] = useState<ViewMode>("table");
+  const [viewMode, setViewMode] = useState<ViewMode>("kanban");
   const [openReportId, setOpenReportId] = useState<string | null>(null);
 
   const handleOpenReport = useCallback((id: string) => setOpenReportId(id), []);

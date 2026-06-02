@@ -535,10 +535,24 @@ fn read_report(app_paths: &AppPaths, id: &str) -> Result<CommandResponse, Comman
 pub fn dispatch(
     app: tauri::AppHandle,
     command: Command,
-    paths_state: tauri::State<'_, AppPaths>,
+    startup_paths: tauri::State<'_, AppPaths>,
     config_base: tauri::State<'_, ConfigBase>,
     registry: tauri::State<'_, crate::sidecar::JobRegistry>,
 ) -> Result<CommandResponse, CommandError> {
+    // Re-resolve the repo root LIVE each call (env → config.json → default), so a
+    // root the user just picked (save_config writes config.json) takes effect
+    // without a restart. Fall back to the startup root if nothing valid resolves.
+    let env_root = std::env::var("CAREER_OPS_PATH").ok();
+    let live_root = crate::paths::resolve_repo_root(
+        env_root.as_deref(),
+        &config_base.0,
+        &config_base.0,
+    )
+    .ok()
+    .filter(|r| crate::paths::is_valid_root(r))
+    .unwrap_or_else(|| startup_paths.root.clone());
+    let paths_state = AppPaths { root: live_root };
+
     match command {
         // Cancel a running job's process group. Unknown ids are a no-op Ok.
         Command::CancelJob { job_id } => {

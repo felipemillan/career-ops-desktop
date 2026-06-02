@@ -99,13 +99,30 @@ export type CommandError = {
 // Core dispatcher — private
 // ---------------------------------------------------------------------------
 
+/**
+ * Tauri rejects a Rust `Err(CommandError)` as a plain object {code, message},
+ * not an Error. Normalise to a real Error whose `.message` carries the code
+ * (so `err.message.includes('repo_not_configured')` works) + expose `.code`.
+ */
+function normalizeError(err: unknown): Error & { code?: string } {
+  if (err instanceof Error) return err;
+  if (err && typeof err === 'object') {
+    const e = err as { code?: string; message?: string };
+    const msg = [e.code, e.message].filter(Boolean).join(': ') || JSON.stringify(err);
+    const out = new Error(msg) as Error & { code?: string };
+    if (e.code) out.code = e.code;
+    return out;
+  }
+  return new Error(String(err));
+}
+
 async function dispatch<T extends CommandResponse>(command: Cmd): Promise<T> {
   try {
     return await invoke<T>('dispatch', { command });
   } catch (err) {
     // Capture the command name only — never args (may contain url/key/path)
     captureError(err, { cmd: command.cmd });
-    throw err;
+    throw normalizeError(err);
   }
 }
 

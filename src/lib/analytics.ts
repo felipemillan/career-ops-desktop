@@ -73,8 +73,21 @@ function scrubEvent(event: CaptureResult | null): CaptureResult | null {
     delete (props as Record<string, unknown>)[key];
   }
 
+  // PostHog routing/identity fields — MUST pass through untouched. Scrubbing
+  // `token` (the phc_ project key) breaks ingestion: events get 200 then dropped.
+  const PRESERVE = new Set([
+    'token',
+    'distinct_id',
+    '$device_id',
+    '$session_id',
+    '$window_id',
+    '$pageview_id',
+    'uuid',
+  ]);
+
   // Walk all string properties: drop URL-like values, scrub the rest
   for (const key of Object.keys(props)) {
+    if (PRESERVE.has(key)) continue;
     const val = props[key];
     if (typeof val === 'string') {
       // Drop property entirely if its value looks like a URL or home path
@@ -117,6 +130,10 @@ export const posthogOptions = {
   api_host: POSTHOG_HOST,
   defaults: '2026-05-30',
   person_profiles: 'identified_only',
+  // log posthog activity to the webview console in dev (visible in devtools)
+  debug: import.meta.env.DEV,
+  // send each event immediately (no batching) — more reliable in WKWebView
+  request_batching: false,
   // ── Privacy overrides (beat the defaults preset) ───────────────────────────
   autocapture: false,
   capture_pageview: true, // desktop $current_url is localhost/tauri:// (non-PII) + scrubbed; clears onboarding

@@ -107,7 +107,10 @@ export function initAnalytics(): void {
     api_host: host,
     // ── Privacy guards ─────────────────────────────────────────────────────
     autocapture: false,
-    capture_pageview: false,
+    // pageview ON so PostHog detects the SDK + clears onboarding; in a desktop
+    // webview $current_url is just localhost/tauri:// (no PII) and before_send
+    // strips it anyway. pageleave stays off.
+    capture_pageview: true,
     capture_pageleave: false,
     disable_session_recording: true,
     mask_all_text: true,
@@ -119,6 +122,9 @@ export function initAnalytics(): void {
   });
 
   _enabled = true;
+
+  // Explicit first event so the pipeline + project are confirmable immediately.
+  posthog.capture('app_opened');
 
   // Register global error handlers → captureError (scrubbed)
   window.addEventListener('error', (event) => {

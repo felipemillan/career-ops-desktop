@@ -3,6 +3,7 @@
  * All IPC goes through here. Mirror of the frozen Rust wire contract.
  */
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -228,4 +229,95 @@ export function updateStatus(
     ? { cmd: 'update_status', app_number: appNumber, status, notes }
     : { cmd: 'update_status', app_number: appNumber, status };
   return dispatch<Extract<CommandResponse, { kind: 'write_ok' }>>(cmd);
+}
+
+// ---------------------------------------------------------------------------
+// PTY commands — direct invoke (NOT via dispatch), Phase 4
+// ---------------------------------------------------------------------------
+
+/** Opens a new PTY with the given dimensions. Returns a ptyId (e.g. "pty-1"). */
+export function openPty(cols: number, rows: number): Promise<string> {
+  return invoke<string>('pty_open', { cols, rows });
+}
+
+/**
+ * Writes raw bytes to the PTY. `dataBase64` must be base64-encoded bytes
+ * (NOT a unicode string passed through btoa — use TextEncoder + bytesToBase64).
+ */
+export function writePty(ptyId: string, dataBase64: string): Promise<void> {
+  return invoke<void>('pty_write', { ptyId, data: dataBase64 });
+}
+
+/** Resizes the PTY to new cols/rows (call after FitAddon.fit()). */
+export function resizePty(ptyId: string, cols: number, rows: number): Promise<void> {
+  return invoke<void>('pty_resize', { ptyId, cols, rows });
+}
+
+/** Kills the PTY process (call on component unmount). */
+export function killPty(ptyId: string): Promise<void> {
+  return invoke<void>('pty_kill', { ptyId });
+}
+
+// ---------------------------------------------------------------------------
+// PTY event helpers — subscribe to backend events, Phase 4
+// ---------------------------------------------------------------------------
+
+type PtyDataPayload = { ptyId: string; data: string };
+type PtyExitPayload = { ptyId: string; code: number | null };
+
+/**
+ * Subscribe to `pty://data` events.
+ * The callback receives the ptyId and a Uint8Array of raw output bytes
+ * (the base64 payload is decoded internally).
+ */
+export function onPtyData(
+  cb: (ptyId: string, bytes: Uint8Array) => void,
+): Promise<UnlistenFn> {
+  return listen<PtyDataPayload>('pty://data', (event) => {
+    const { ptyId, data } = event.payload;
+    cb(ptyId, base64ToBytes(data));
+  });
+}
+
+/**
+ * Subscribe to `pty://exit` events.
+ * The callback receives the ptyId and the exit code (null if signaled).
+ */
+export function onPtyExit(
+  cb: (ptyId: string, code: number | null) => void,
+): Promise<UnlistenFn> {
+  return listen<PtyExitPayload>('pty://exit', (event) => {
+    const { ptyId, code } = event.payload;
+    cb(ptyId, code);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Base64 helpers — binary-safe, used internally and exported for TerminalTab
+// ---------------------------------------------------------------------------
+
+/**
+ * Encode a Uint8Array to a base64 string.
+ * Safe for arbitrary binary data (avoids the btoa+charCodeAt trick which
+ * breaks on multi-byte UTF-8 since we operate on raw bytes, not code points).
+ */
+export function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+/**
+ * Decode a base64 string to a Uint8Array.
+ * Mirrors bytesToBase64.
+ */
+export function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
 }

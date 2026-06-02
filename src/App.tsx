@@ -1,12 +1,16 @@
 /**
- * App.tsx — Root shell: sidebar nav + tab host. Owned by the shell. Agents: do NOT edit.
+ * App.tsx — Root shell: sidebar nav + tab host. Owned by the shell.
  * Inactive tabs stay mounted with `hidden` to preserve scroll/state.
  * All IPC goes through ipc.ts — never import invoke here.
+ *
+ * Phase 3 (P3-T5): ActionBar (global Lane-A toolbar) + ConsolePanel (bottom drawer).
  */
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useState } from "react";
 import "./App.css";
 import { Sidebar } from "./components/Sidebar";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ActionBar } from "./components/ActionBar";
+import { ConsolePanel } from "./components/ConsolePanel";
 import { TABS, type TabId } from "./lib/tabs";
 import { Applications } from "./tabs/Applications";
 
@@ -34,12 +38,26 @@ function App() {
   // Track which tabs have been activated, so we mount lazily then keep them alive.
   const [seen, setSeen] = useState<Set<TabId>>(new Set(["applications"]));
 
+  // Console drawer: null = closed, string = focus job_id (open)
+  const [consoleJobId, setConsoleJobId] = useState<string | null>(null);
+  const [consoleOpen, setConsoleOpen] = useState(false);
+
+  const handleJobStarted = useCallback((jobId: string) => {
+    setConsoleJobId(jobId);
+    setConsoleOpen(true);
+  }, []);
+
+  const handleConsoleClose = useCallback(() => {
+    setConsoleOpen(false);
+    setConsoleJobId(null);
+  }, []);
+
   const select = (id: TabId) => {
     setActive(id);
     setSeen((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
   };
 
-  // Cmd+1..5 shortcuts
+  // Cmd+1..6 shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!e.metaKey) return;
@@ -65,23 +83,37 @@ function App() {
   return (
     <div className="h-screen flex bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100">
       <Sidebar active={active} onSelect={select} />
-      <main className="flex-1 overflow-auto">
-        {(Object.keys(panes) as Array<keyof typeof panes>).map((id) =>
-          seen.has(id) ? (
-            <div key={id} className={id === active ? "p-4" : "hidden"}>
-              <ErrorBoundary label={id}>
-                <Suspense
-                  fallback={
-                    <div className="p-8 text-sm text-gray-400">Loading {id}…</div>
-                  }
-                >
-                  {panes[id]}
-                </Suspense>
-              </ErrorBoundary>
-            </div>
-          ) : null,
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* Lane-A action toolbar — visible across all tabs */}
+        <ActionBar onJobStarted={handleJobStarted} />
+
+        {/* Tab content */}
+        <main className="flex-1 overflow-auto">
+          {(Object.keys(panes) as Array<keyof typeof panes>).map((id) =>
+            seen.has(id) ? (
+              <div key={id} className={id === active ? "p-4" : "hidden"}>
+                <ErrorBoundary label={id}>
+                  <Suspense
+                    fallback={
+                      <div className="p-8 text-sm text-gray-400">Loading {id}…</div>
+                    }
+                  >
+                    {panes[id]}
+                  </Suspense>
+                </ErrorBoundary>
+              </div>
+            ) : null,
+          )}
+        </main>
+
+        {/* Streaming console drawer — collapsed by default, expands when a job starts */}
+        {consoleOpen && (
+          <ConsolePanel
+            focusJobId={consoleJobId}
+            onClose={handleConsoleClose}
+          />
         )}
-      </main>
+      </div>
     </div>
   );
 }

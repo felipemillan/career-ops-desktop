@@ -7,6 +7,7 @@
  */
 import { useState, useEffect, useCallback } from "react";
 import { listReports } from "../lib/ipc";
+import { subscribe } from "../lib/store";
 import { matchReportFilename } from "../lib/parsers/report";
 import type { ReportMeta } from "../lib/types";
 
@@ -60,6 +61,8 @@ export function useReports(): UseReportsResult {
 
   useEffect(() => {
     load();
+    // Re-fetch when something emits a 'reports' refresh (e.g. an eval job finishing).
+    return subscribe("reports", load);
   }, [load]);
 
   return { items, loading, error, refresh: load };

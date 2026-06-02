@@ -14,6 +14,7 @@
 import { listen } from '@tauri-apps/api/event';
 import { useState, useEffect } from 'react';
 import { track } from './analytics';
+import { emitRefresh } from './store';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -170,6 +171,12 @@ export function setupListeners(): void {
     if (entry) {
       track('job_finished', { label: entry.label, code, success: code === 0 });
     }
+    // A finished job may have written tracker/pipeline/report/scan files —
+    // refresh every read view so new data (e.g. eval reports) shows immediately.
+    emitRefresh('applications');
+    emitRefresh('reports');
+    emitRefresh('pipeline');
+    emitRefresh('scan');
   }).catch(() => {
     // Tauri not available in test/SSR environment — ignore.
   });

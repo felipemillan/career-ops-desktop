@@ -1,9 +1,8 @@
 /**
- * ApplicationsKanban.tsx — Read-only kanban of career applications.
+ * ApplicationsKanban.tsx — Persistent kanban of career applications.
  *
- * Uses @dnd-kit for drag interaction, but is intentionally READ-ONLY:
- * cards snap back to their original column on drop. No writes happen.
- * Status changes are deferred to Phase 5.
+ * Drag a card to a different column → calls updateStatus via ipc.ts, emits
+ * emitRefresh('applications') on success. Optimistic move + rollback on error.
  *
  * Columns = 8 canonical statuses from CLAUDE.md:
  *   Evaluated, Applied, Responded, Interview, Offer, Rejected, Discarded, SKIP
@@ -27,6 +26,9 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import type { CareerApplication } from "../../lib/types";
 import { reportIdFromApp } from "../../lib/report-id";
+import { updateStatus } from "../../lib/ipc";
+import type { CanonicalStatus } from "../../lib/ipc";
+import { emitRefresh, fetchApplications } from "../../lib/store";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -62,16 +64,40 @@ function scoreColor(score: number | null): string {
 }
 
 // ---------------------------------------------------------------------------
+// Pure helper — exported so it can be unit-tested without React
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if a drag from `currentStatus` onto a column identified by
+ * `targetColumnId` should trigger a backend write.
+ *
+ * No-op conditions:
+ *   - dropped back in the same column
+ *   - targetColumnId is not one of the 8 canonical statuses (dropped in limbo)
+ */
+export function shouldWriteStatus(
+  currentStatus: string,
+  targetColumnId: string,
+): boolean {
+  if (targetColumnId === currentStatus) return false;
+  return (CANONICAL_STATUSES as readonly string[]).includes(targetColumnId);
+}
+
+// ---------------------------------------------------------------------------
 // Grouping helper
 // ---------------------------------------------------------------------------
 
-function groupByStatus(apps: CareerApplication[]): Record<string, CareerApplication[]> {
+function groupByStatus(
+  apps: CareerApplication[],
+  overrides: Map<number, CanonicalStatus>,
+): Record<string, CareerApplication[]> {
   const cols: Record<string, CareerApplication[]> = {};
   for (const s of CANONICAL_STATUSES) cols[s] = [];
 
   for (const app of apps) {
-    const key = (CANONICAL_STATUSES as readonly string[]).includes(app.status)
-      ? app.status
+    const effectiveStatus = overrides.get(app.number) ?? app.status;
+    const key = (CANONICAL_STATUSES as readonly string[]).includes(effectiveStatus)
+      ? effectiveStatus
       : "Evaluated";
     cols[key].push(app);
   }
@@ -89,8 +115,37 @@ function groupByStatus(apps: CareerApplication[]): Record<string, CareerApplicat
   return cols;
 }
 
+/**
+ * Derive which column a card currently lives in, respecting local overrides.
+ */
+function effectiveStatus(
+  app: CareerApplication,
+  overrides: Map<number, CanonicalStatus>,
+): string {
+  return overrides.get(app.number) ?? app.status;
+}
+
+/**
+ * Given the drag event's `over.id`, figure out the target column status.
+ * `over.id` may be a column id (a status string) or a card id (app.number string).
+ * We resolve card ids by looking up their column in the provided columns map.
+ */
+function resolveTargetColumn(
+  overId: string,
+  columns: Record<string, CareerApplication[]>,
+): string | null {
+  // Direct column id?
+  if ((CANONICAL_STATUSES as readonly string[]).includes(overId)) return overId;
+
+  // Card id — find which column it belongs to
+  for (const [status, cards] of Object.entries(columns)) {
+    if (cards.some((c) => String(c.number) === overId)) return status;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
-// Card component (sortable slot — drag is purely visual)
+// Card component
 // ---------------------------------------------------------------------------
 
 interface AppCardProps {
@@ -122,7 +177,7 @@ function AppCard({ app, isDragging = false, onOpenReport }: AppCardProps) {
         "cursor-grab active:cursor-grabbing select-none",
         "hover:border-gray-300 dark:hover:border-gray-600 transition-colors",
       ].join(" ")}
-      title="Drag is visual only — status changes save in a later version"
+      title="Drag to a different column to change status — writes a .bak backup automatically"
       {...attributes}
       {...listeners}
     >
@@ -247,6 +302,37 @@ function KanbanColumn({ status, apps, onOpenReport }: KanbanColumnProps) {
 }
 
 // ---------------------------------------------------------------------------
+// Toast — inline non-blocking error notice
+// ---------------------------------------------------------------------------
+
+interface ToastProps {
+  message: string;
+  onDismiss: () => void;
+}
+
+function ErrorToast({ message, onDismiss }: ToastProps) {
+  return (
+    <div
+      role="alert"
+      className="flex items-start gap-2 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 px-3 py-2 text-xs text-red-700 dark:text-red-300"
+    >
+      <span aria-hidden>⚠️</span>
+      <span className="flex-1">
+        <strong>Status update failed</strong> — {message}
+      </span>
+      <button
+        type="button"
+        aria-label="Dismiss error"
+        onClick={onDismiss}
+        className="shrink-0 ml-1 text-red-500 hover:text-red-700 dark:hover:text-red-200 transition-colors"
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
@@ -256,7 +342,11 @@ interface ApplicationsKanbanProps {
 }
 
 export function ApplicationsKanban({ apps, onOpenReport }: ApplicationsKanbanProps) {
-  const columns = groupByStatus(apps);
+  // Optimistic overrides: map from app.number → new status (pending backend confirmation)
+  const [overrides, setOverrides] = useState<Map<number, CanonicalStatus>>(new Map());
+
+  // Non-blocking error message shown below the board header
+  const [dragError, setDragError] = useState<string | null>(null);
 
   // Track which card is being dragged (for overlay)
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -264,6 +354,9 @@ export function ApplicationsKanban({ apps, onOpenReport }: ApplicationsKanbanPro
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } })
   );
+
+  // Build columns from props + overrides
+  const columns = groupByStatus(apps, overrides);
 
   const activeApp = activeId
     ? apps.find((a) => String(a.number) === activeId) ?? null
@@ -273,12 +366,84 @@ export function ApplicationsKanban({ apps, onOpenReport }: ApplicationsKanbanPro
     setActiveId(String(event.active.id));
   }, []);
 
-  // READ-ONLY: On drag end, simply clear the active ID.
-  // The card returns to its original position because columns state is derived
-  // from props (apps), not from drag state. No writes occur.
-  const handleDragEnd = useCallback((_event: DragEndEvent) => {
-    setActiveId(null);
-  }, []);
+  const handleDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      setActiveId(null);
+
+      const { active, over } = event;
+      if (!over) return;
+
+      const cardId = String(active.id);
+      const overId = String(over.id);
+
+      // Find the app being dragged
+      const app = apps.find((a) => String(a.number) === cardId);
+      if (!app) return;
+
+      const currentSt = effectiveStatus(app, overrides);
+      const targetSt = resolveTargetColumn(overId, columns);
+
+      if (!targetSt) return;
+      if (!shouldWriteStatus(currentSt, targetSt)) return;
+
+      const targetStatus = targetSt as CanonicalStatus;
+      const appNumber = app.number;
+
+      // --- Optimistic update ---
+      setOverrides((prev) => {
+        const next = new Map(prev);
+        next.set(appNumber, targetStatus);
+        return next;
+      });
+      setDragError(null);
+
+      // --- Backend write ---
+      updateStatus(appNumber, targetStatus)
+        .then(() => {
+          // Success — emit refresh so the store re-reads applications.md.
+          // fetchApplications will push fresh data → useApplications() re-renders
+          // → parent passes new `apps` prop → overrides for this app become redundant
+          // but we clear them anyway for cleanliness.
+          emitRefresh("applications");
+          fetchApplications()
+            .then(() => {
+              // Once fresh data is in the store, remove the override
+              setOverrides((prev) => {
+                const next = new Map(prev);
+                next.delete(appNumber);
+                return next;
+              });
+            })
+            .catch(() => {
+              // fetchApplications error is handled by the store; override stays
+              // until next successful refresh. That's acceptable.
+            });
+        })
+        .catch((err: unknown) => {
+          // --- Rollback ---
+          setOverrides((prev) => {
+            const next = new Map(prev);
+            next.delete(appNumber);
+            return next;
+          });
+
+          // Surface a non-blocking error
+          let message = "Unknown error";
+          if (
+            err !== null &&
+            typeof err === "object" &&
+            "message" in err &&
+            typeof (err as { message: unknown }).message === "string"
+          ) {
+            message = (err as { message: string }).message;
+          } else if (err instanceof Error) {
+            message = err.message;
+          }
+          setDragError(message);
+        });
+    },
+    [apps, overrides, columns],
+  );
 
   if (apps.length === 0) {
     return (
@@ -292,13 +457,10 @@ export function ApplicationsKanban({ apps, onOpenReport }: ApplicationsKanbanPro
 
   return (
     <div className="flex flex-col gap-2">
-      {/* Read-only notice */}
-      <div className="flex items-center gap-2 rounded-lg bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-        <span aria-hidden>👀</span>
-        <span>
-          <strong>Read-only view</strong> — dragging cards is visual only. Status changes will be saved in a future version (Phase 5).
-        </span>
-      </div>
+      {/* Non-blocking write error */}
+      {dragError !== null && (
+        <ErrorToast message={dragError} onDismiss={() => setDragError(null)} />
+      )}
 
       {/* Kanban board — horizontally scrollable */}
       <DndContext

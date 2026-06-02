@@ -115,7 +115,8 @@ export const analyticsEnabled = !!POSTHOG_TOKEN;
  */
 export const posthogOptions = {
   api_host: POSTHOG_HOST,
-  defaults: '2026-01-30',
+  defaults: '2026-05-30',
+  person_profiles: 'identified_only',
   // ── Privacy overrides (beat the defaults preset) ───────────────────────────
   autocapture: false,
   capture_pageview: true, // desktop $current_url is localhost/tauri:// (non-PII) + scrubbed; clears onboarding

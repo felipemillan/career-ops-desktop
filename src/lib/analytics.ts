@@ -25,7 +25,7 @@ import type { CaptureResult } from 'posthog-js';
 // Module state
 // ---------------------------------------------------------------------------
 
-let _enabled = false;
+let _enabled = !!(import.meta.env.VITE_POSTHOG_PROJECT_TOKEN as string | undefined);
 
 // ---------------------------------------------------------------------------
 // scrubString — the PII firewall
@@ -93,48 +93,60 @@ function scrubEvent(event: CaptureResult | null): CaptureResult | null {
 // initAnalytics
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Provider config — consumed by <PostHogProvider> in main.tsx
+// ---------------------------------------------------------------------------
+
+/** Project token (phc_…). Telemetry is OFF when absent. */
+export const POSTHOG_TOKEN = import.meta.env.VITE_POSTHOG_PROJECT_TOKEN as
+  | string
+  | undefined;
+
+const POSTHOG_HOST = (import.meta.env.VITE_POSTHOG_HOST as string | undefined) ??
+  'https://eu.i.posthog.com';
+
+/** True when a project token is configured. main.tsx renders the provider iff true. */
+export const analyticsEnabled = !!POSTHOG_TOKEN;
+
+/**
+ * Options for <PostHogProvider>. Uses PostHog's `defaults` preset (per the
+ * official snippet) but OVERRIDES every capture that could leak personal data —
+ * this app holds applications, CV, URLs, keys. Overrides win over the preset.
+ */
+export const posthogOptions = {
+  api_host: POSTHOG_HOST,
+  defaults: '2026-01-30',
+  // ── Privacy overrides (beat the defaults preset) ───────────────────────────
+  autocapture: false,
+  capture_pageview: true, // desktop $current_url is localhost/tauri:// (non-PII) + scrubbed; clears onboarding
+  capture_pageleave: false,
+  disable_session_recording: true,
+  capture_heatmaps: false,
+  mask_all_text: true,
+  mask_all_element_attributes: true,
+  persistence: 'localStorage',
+  // ── PII firewall ───────────────────────────────────────────────────────────
+  before_send: scrubEvent,
+} as const;
+
+/**
+ * Wire global error handlers → captureError (scrubbed). Call once in main.tsx.
+ * The PostHogProvider performs posthog.init(); this only adds window capture.
+ */
 export function initAnalytics(): void {
-  const key = import.meta.env.VITE_POSTHOG_KEY as string | undefined;
-  const host = (import.meta.env.VITE_POSTHOG_HOST as string | undefined) ??
-    'https://eu.i.posthog.com';
-
-  if (!key) {
-    // No key → stay disabled, all calls are no-ops
-    return;
-  }
-
-  posthog.init(key, {
-    api_host: host,
-    // ── Privacy guards ─────────────────────────────────────────────────────
-    autocapture: false,
-    // pageview ON so PostHog detects the SDK + clears onboarding; in a desktop
-    // webview $current_url is just localhost/tauri:// (no PII) and before_send
-    // strips it anyway. pageleave stays off.
-    capture_pageview: true,
-    capture_pageleave: false,
-    disable_session_recording: true,
-    mask_all_text: true,
-    mask_all_element_attributes: true,
-    // ── Storage ─────────────────────────────────────────────────────────────
-    persistence: 'localStorage',
-    // ── PII firewall ─────────────────────────────────────────────────────
-    before_send: scrubEvent,
-  });
-
+  if (!analyticsEnabled) return;
   _enabled = true;
 
-  // Explicit first event so the pipeline + project are confirmable immediately.
-  posthog.capture('app_opened');
-
-  // Register global error handlers → captureError (scrubbed)
   window.addEventListener('error', (event) => {
     captureError(event.error ?? new Error(event.message));
   });
 
   window.addEventListener('unhandledrejection', (event) => {
-    captureError(event.reason instanceof Error
-      ? event.reason
-      : new Error(String(event.reason)));
+    captureError(
+      event.reason instanceof Error
+        ? event.reason
+        : new Error(String(event.reason)),
+    );
   });
 }
 

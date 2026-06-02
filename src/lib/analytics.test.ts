@@ -131,9 +131,11 @@ describe('analytics module — disabled state (no VITE_POSTHOG_KEY)', () => {
     vi.resetModules();
   });
 
-  it('isAnalyticsEnabled() returns false before initAnalytics()', () => {
-    // The module is imported at top-level; in test env key is absent → disabled
-    expect(isAnalyticsEnabled()).toBe(false);
+  it('isAnalyticsEnabled() reflects token presence', () => {
+    // Gating is token-based now; assert the relationship (env-agnostic).
+    expect(isAnalyticsEnabled()).toBe(
+      !!import.meta.env.VITE_POSTHOG_PROJECT_TOKEN,
+    );
   });
 
   it('track() is a no-op and does not throw', () => {

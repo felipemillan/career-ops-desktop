@@ -108,6 +108,39 @@ pub fn validate_status(status: &str) -> Result<CanonicalStatus, CommandError> {
     }
 }
 
+/// Validate an eval model token against `^[a-z0-9][a-z0-9.\-]{2,40}$`.
+///
+/// A sane CLI `--model` token: starts with a lowercase letter or digit, then 2
+/// to 40 more chars from `[a-z0-9.-]` (total length 3..=41). This rejects empty
+/// strings, uppercase, whitespace, slashes, and shell metacharacters so the
+/// value can be forwarded as a `--model` argv element safely. On success the
+/// trimmed token is returned. Rejection → [`ErrorCode::InvalidArg`].
+pub fn validate_eval_model(model: &str) -> Result<String, CommandError> {
+    let trimmed = model.trim();
+    let bytes = trimmed.as_bytes();
+    // Total length: leading char + 2..=40 more = 3..=41.
+    if bytes.len() < 3 || bytes.len() > 41 {
+        return Err(invalid(format!(
+            "model has an implausible length (3..=41): {model:?}"
+        )));
+    }
+    let first = bytes[0];
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return Err(invalid(format!(
+            "model must start with a lowercase letter or digit: {model:?}"
+        )));
+    }
+    let rest_ok = bytes[1..]
+        .iter()
+        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-');
+    if !rest_ok {
+        return Err(invalid(format!(
+            "model contains disallowed characters (allowed: a-z 0-9 . -): {model:?}"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
 /// Validate a report id against `^\d{3}-[a-z0-9-]+-\d{4}-\d{2}-\d{2}$`.
 ///
 /// Hand-rolled (no `regex` dependency). The id is `{ddd}-{slug}-{YYYY}-{MM}-{DD}`
@@ -253,6 +286,48 @@ mod tests {
     fn status_rejects_free_text_and_case_variants() {
         for bad in ["evaluated", "applied", "skip", "Skip", "", "Done", "In Review", "rejected "] {
             let err = validate_status(bad).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidArg, "expected reject for {bad:?}");
+        }
+    }
+
+    // ---- validate_eval_model ----
+
+    #[test]
+    fn eval_model_accepts_sane_tokens() {
+        for ok in [
+            "claude-sonnet-4-6",
+            "claude-opus-4-8",
+            "gpt-4.1",
+            "haiku",
+            "gpt5",
+            "claude-3-5-sonnet-20241022",
+        ] {
+            assert!(validate_eval_model(ok).is_ok(), "should accept {ok:?}");
+        }
+        // Trimming is applied.
+        assert_eq!(
+            validate_eval_model("  claude-sonnet-4-6  ").unwrap(),
+            "claude-sonnet-4-6"
+        );
+    }
+
+    #[test]
+    fn eval_model_rejects_junk() {
+        let too_long = "a".repeat(42);
+        for bad in [
+            "",
+            "  ",
+            "ab",              // too short (2)
+            "-leading-hyphen", // starts with hyphen
+            ".leading-dot",    // starts with dot
+            "Claude-Sonnet",   // uppercase
+            "claude sonnet",   // space
+            "claude/sonnet",   // slash
+            "claude;rm -rf",   // metachars
+            "model$(whoami)",  // command substitution
+            too_long.as_str(), // too long (>41)
+        ] {
+            let err = validate_eval_model(bad).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidArg, "expected reject for {bad:?}");
         }
     }

@@ -18,11 +18,13 @@ import {
   runFollowup,
   runVerifyPipeline,
   evaluateUrl,
+  evaluateAll,
 } from '../lib/ipc';
 import { startTracking } from '../lib/jobs';
 import { track } from '../lib/analytics';
 import { QueueUrlButton } from './QueueUrlButton';
 import { FirecrawlPanel } from './FirecrawlPanel';
+import { ModelSelect } from './ModelSelect';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -96,6 +98,8 @@ export function ActionBar({ onJobStarted }: ActionBarProps): React.ReactElement 
   const [evalError, setEvalError] = useState<string | null>(null);
   const [evalRunning, setEvalRunning] = useState(false);
   const [firecrawlOpen, setFirecrawlOpen] = useState(false);
+  const [evalAllRunning, setEvalAllRunning] = useState(false);
+  const [evalAllError, setEvalAllError] = useState<string | null>(null);
 
   async function fireJob(
     key: string,
@@ -131,6 +135,26 @@ export function ActionBar({ onJobStarted }: ActionBarProps): React.ReactElement 
       setEvalError(err instanceof Error ? err.message : String(err));
     } finally {
       setEvalRunning(false);
+    }
+  }
+
+  async function handleEvaluateAll(): Promise<void> {
+    if (evalAllRunning) return;
+    const confirmed = window.confirm(
+      'Evaluate ALL pending pipeline URLs with claude.\n\nThis spends tokens and may take a while.\n\nContinue?',
+    );
+    if (!confirmed) return;
+    setEvalAllError(null);
+    setEvalAllRunning(true);
+    track('action_run', { action: 'evaluate_all' });
+    try {
+      const res = await evaluateAll();
+      startTracking(res.job_id, 'Evaluate all');
+      onJobStarted(res.job_id);
+    } catch (err) {
+      setEvalAllError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setEvalAllRunning(false);
     }
   }
 
@@ -266,6 +290,36 @@ export function ActionBar({ onJobStarted }: ActionBarProps): React.ReactElement 
           {evalError && (
             <span className="text-[10px] text-red-500 dark:text-red-400 truncate max-w-[160px]" title={evalError}>
               {evalError}
+            </span>
+          )}
+        </div>
+
+        {/* --- Model selector --- */}
+        <ModelSelect />
+
+        <div className="w-px h-4 bg-gray-300 dark:bg-gray-700" aria-hidden="true" />
+
+        {/* --- Evaluate All --- */}
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            disabled={evalAllRunning}
+            onClick={() => void handleEvaluateAll()}
+            title="Evaluate ALL pending pipeline URLs — spends tokens, may take a while"
+            className={[
+              'inline-flex items-center px-2.5 py-1 rounded text-xs font-medium transition-colors',
+              'border border-orange-400 dark:border-orange-500',
+              evalAllRunning
+                ? 'opacity-50 cursor-not-allowed bg-orange-200 dark:bg-orange-900/40 text-orange-400'
+                : 'bg-orange-50 dark:bg-orange-900/20 text-orange-700 dark:text-orange-300 hover:bg-orange-100 dark:hover:bg-orange-900/40 cursor-pointer',
+            ].join(' ')}
+          >
+            Evaluate all
+            {evalAllRunning && <Spinner />}
+          </button>
+          {evalAllError && (
+            <span className="text-[10px] text-red-500 dark:text-red-400 truncate max-w-[160px]" title={evalAllError}>
+              {evalAllError}
             </span>
           )}
         </div>

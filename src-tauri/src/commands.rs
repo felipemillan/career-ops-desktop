@@ -77,6 +77,11 @@ pub enum Command {
     // --- Phase 5: Lane B eval + firecrawl + the two writes ---
     /// Headless `claude -p` evaluation of a URL. Returns `JobStarted`.
     EvaluateUrl { url: String },
+    /// Batch-evaluate every PENDING (`- [ ]`) URL in `pipeline.md`, sequentially,
+    /// in one cancellable background job. Returns `JobStarted`.
+    EvaluateAll,
+    /// Persist the eval model token into `config.json` (merged, atomic).
+    SetEvalModel { model: String },
     /// Add a firecrawl API key (appended to `.env.firecrawl` via `writes.rs`).
     FirecrawlAddKey { key: String },
     /// Remove a firecrawl API key by index.
@@ -222,10 +227,11 @@ pub struct ReportMeta {
 pub enum CommandResponse {
     /// Verbatim file content (applications, pipeline, scan history, a report).
     Text { content: String },
-    /// The resolved config: repo root + firecrawl status.
+    /// The resolved config: repo root + firecrawl status + eval model.
     Config {
         root: String,
         firecrawl: FirecrawlStatusDto,
+        eval_model: String,
     },
     /// A listing of reports.
     Reports { items: Vec<ReportMeta> },
@@ -257,9 +263,14 @@ pub fn handle(
 ) -> Result<CommandResponse, CommandError> {
     match command {
         Command::ReadApplications => read_applications(app_paths),
-        Command::GetConfig => get_config(app_paths),
+        Command::GetConfig => get_config(app_paths, config_base),
         Command::SaveConfig { root } => {
             writes::save_config(config_base, &root)?;
+            Ok(CommandResponse::WriteOk { duplicate: false })
+        }
+        Command::SetEvalModel { model } => {
+            let model = crate::validate::validate_eval_model(&model)?;
+            writes::save_eval_model(config_base, &model)?;
             Ok(CommandResponse::WriteOk { duplicate: false })
         }
         // --- Phase 2: additional reads ---
@@ -306,11 +317,13 @@ fn read_applications(app_paths: &AppPaths) -> Result<CommandResponse, CommandErr
     }
 }
 
-/// `GetConfig`: report the resolved root and the (dormant) firecrawl status.
-fn get_config(app_paths: &AppPaths) -> Result<CommandResponse, CommandError> {
+/// `GetConfig`: report the resolved root, the (dormant) firecrawl status, and
+/// the configured eval model (default when unset).
+fn get_config(app_paths: &AppPaths, config_base: &Path) -> Result<CommandResponse, CommandError> {
     Ok(CommandResponse::Config {
         root: app_paths.root.to_string_lossy().into_owned(),
         firecrawl: FirecrawlStatusDto::dormant(),
+        eval_model: crate::paths::read_eval_model(config_base),
     })
 }
 
@@ -655,7 +668,11 @@ pub fn dispatch(
         Command::EvaluateUrl { url } => {
             crate::validate::validate_url(&url)?;
             let claude = crate::env::require_claude()?;
+            let model = crate::paths::read_eval_model(&config_base.0);
+            // Model BEFORE -p.
             let args = vec![
+                "--model".to_string(),
+                model,
                 "-p".to_string(),
                 format!("/career-ops oferta {url}"),
             ];
@@ -666,6 +683,55 @@ pub fn dispatch(
                 &args,
                 &paths_state.root,
             )?;
+            Ok(CommandResponse::JobStarted { job_id })
+        }
+
+        // --- Batch-evaluate every PENDING url in pipeline.md, sequentially ---
+        Command::EvaluateAll => {
+            let claude = crate::env::require_claude()?;
+            let model = crate::paths::read_eval_model(&config_base.0);
+
+            // Read pipeline.md (data/ preferred, root fallback). Missing → empty.
+            let pipeline = match std::fs::read_to_string(paths_state.pipeline_md()) {
+                Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(e) => {
+                    return Err(CommandError::new(
+                        ErrorCode::Internal,
+                        format!("failed to read pipeline.md: {e}"),
+                    ));
+                }
+            };
+
+            let urls = pending_urls(&pipeline);
+            if urls.is_empty() {
+                return Err(CommandError::new(
+                    ErrorCode::InvalidArg,
+                    "no pending URLs in pipeline",
+                ));
+            }
+
+            let leading = format!(
+                "Evaluating {} pending URLs with model {model}…",
+                urls.len()
+            );
+            let model_for_args = model.clone();
+            let job_id = crate::sidecar::spawn_sequential_job(
+                &app,
+                &registry,
+                claude.to_string_lossy().into_owned(),
+                move |url| {
+                    vec![
+                        "--model".to_string(),
+                        model_for_args.clone(),
+                        "-p".to_string(),
+                        format!("/career-ops oferta {url}"),
+                    ]
+                },
+                urls,
+                paths_state.root.clone(),
+                Some(leading),
+            );
             Ok(CommandResponse::JobStarted { job_id })
         }
 
@@ -772,6 +838,50 @@ fn newest_output_match(
             format!("no {ext} input found matching {prefix}* in {}", dir.display()),
         )
     })
+}
+
+/// Extract the PENDING job URLs from `pipeline.md` content.
+///
+/// A pending line is a checklist item `- [ ]` (unchecked); processed `- [x]`
+/// lines are skipped. The first `http://` or `https://` token on a pending line
+/// is taken (lines may be annotated like `- [ ] https://… | Company | …`).
+/// Results are deduplicated, preserving first-seen order. Returns an empty vec
+/// when there are no pending URLs.
+pub fn pending_urls(content: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        // Pending only: `- [ ]`. Explicitly skip processed `- [x]`.
+        if !trimmed.starts_with("- [ ]") {
+            continue;
+        }
+        if let Some(url) = first_url(trimmed) {
+            if seen.insert(url.clone()) {
+                out.push(url);
+            }
+        }
+    }
+    out
+}
+
+/// Return the first `http://` / `https://` URL token found in `line`, or `None`.
+/// The URL runs from the scheme up to the first whitespace or `|` separator
+/// (matching the pipeline's `url | annotation` layout).
+fn first_url(line: &str) -> Option<String> {
+    let idx = line
+        .find("https://")
+        .or_else(|| line.find("http://"))?;
+    let rest = &line[idx..];
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '|')
+        .unwrap_or(rest.len());
+    let url = rest[..end].trim_end_matches(['.', ',', ')']);
+    if url.is_empty() {
+        None
+    } else {
+        Some(url.to_string())
+    }
 }
 
 /// Managed state holding the base dir under which `config.json` lives.
@@ -892,6 +1002,180 @@ mod tests {
         }
     }
 
+    #[test]
+    fn deser_eval_all_and_set_eval_model() {
+        let a: Command = serde_json::from_str(r#"{"cmd":"evaluate_all"}"#).unwrap();
+        assert_eq!(a, Command::EvaluateAll);
+        let b: Command =
+            serde_json::from_str(r#"{"cmd":"set_eval_model","model":"claude-sonnet-4-6"}"#).unwrap();
+        assert_eq!(b, Command::SetEvalModel { model: "claude-sonnet-4-6".into() });
+    }
+
+    #[test]
+    fn config_response_carries_eval_model() {
+        let resp = CommandResponse::Config {
+            root: "/x".into(),
+            firecrawl: FirecrawlStatusDto::dormant(),
+            eval_model: "claude-opus-4-8".into(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["kind"], "config");
+        assert_eq!(v["eval_model"], "claude-opus-4-8");
+    }
+
+    #[test]
+    fn set_eval_model_writes_and_read_back_via_handle() {
+        let tmp = tempdir().unwrap();
+        let root = make_repo_with_apps(tmp.path(), "x", true);
+        let base = tmp.path().join("cfgbase");
+
+        // Default before any write.
+        assert_eq!(
+            paths::read_eval_model(&base),
+            paths::DEFAULT_EVAL_MODEL
+        );
+
+        let resp = handle(
+            Command::SetEvalModel { model: "claude-opus-4-8".into() },
+            &app_paths(root.clone()),
+            &base,
+        )
+        .unwrap();
+        assert!(matches!(resp, CommandResponse::WriteOk { duplicate: false }));
+
+        // The reader sees the persisted model.
+        assert_eq!(paths::read_eval_model(&base), "claude-opus-4-8");
+
+        // GetConfig surfaces it.
+        let cfg = handle(Command::GetConfig, &app_paths(root), &base).unwrap();
+        match cfg {
+            CommandResponse::Config { eval_model, .. } => {
+                assert_eq!(eval_model, "claude-opus-4-8");
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_eval_model_preserves_career_ops_root() {
+        let tmp = tempdir().unwrap();
+        let root = make_repo_with_apps(tmp.path(), "x", true);
+        let base = tmp.path().join("cfgbase");
+
+        // First persist a root, then a model — root must survive the merge.
+        handle(
+            Command::SaveConfig { root: root.to_string_lossy().into_owned() },
+            &app_paths(root.clone()),
+            &base,
+        )
+        .unwrap();
+        handle(
+            Command::SetEvalModel { model: "gpt-4.1".into() },
+            &app_paths(root.clone()),
+            &base,
+        )
+        .unwrap();
+
+        let cfg = paths::read_app_config(&base).unwrap().unwrap();
+        assert_eq!(cfg.career_ops_root.as_deref(), Some(root.to_str().unwrap()));
+        assert_eq!(cfg.eval_model.as_deref(), Some("gpt-4.1"));
+    }
+
+    #[test]
+    fn set_eval_model_rejects_junk_model() {
+        let tmp = tempdir().unwrap();
+        let root = make_repo_with_apps(tmp.path(), "x", true);
+        let base = tmp.path().join("cfgbase");
+        let err = handle(
+            Command::SetEvalModel { model: "Bad Model!".into() },
+            &app_paths(root),
+            &base,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArg);
+        // Nothing was written.
+        assert!(paths::read_app_config(&base).unwrap().is_none());
+    }
+
+    // ---- pending_urls extractor ----
+
+    #[test]
+    fn pending_urls_extracts_unchecked_only() {
+        let content = "\
+# Pipeline
+
+## Pendientes
+- [ ] https://jobs.example.com/1
+- [x] https://done.example.com/done
+- [ ] https://jobs.example.com/2 | Acme | Head of Growth | (annotated)
+- [ ] http://plain.example.com/3
+";
+        let urls = pending_urls(content);
+        assert_eq!(
+            urls,
+            vec![
+                "https://jobs.example.com/1",
+                "https://jobs.example.com/2",
+                "http://plain.example.com/3",
+            ]
+        );
+        // The processed `- [x]` url is excluded.
+        assert!(!urls.iter().any(|u| u.contains("done.example.com")));
+    }
+
+    #[test]
+    fn pending_urls_dedups_and_handles_annotations() {
+        let content = "\
+- [ ] SKIP | https://portal.example.com/filter | not a job
+- [ ] https://dup.example.com/x | Acme
+- [ ] https://dup.example.com/x | Acme (again)
+";
+        let urls = pending_urls(content);
+        // Annotated `- [ ] LABEL | url | ...` still extracts the url.
+        assert!(urls.contains(&"https://portal.example.com/filter".to_string()));
+        // Deduped: the repeated url appears once.
+        assert_eq!(
+            urls.iter().filter(|u| u.as_str() == "https://dup.example.com/x").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn pending_urls_empty_when_none_pending() {
+        // All processed, plus non-checklist noise.
+        let content = "\
+# Pipeline
+## Procesadas
+- [x] https://done.example.com/1
+- [x] https://done.example.com/2
+just a note, no checklist
+";
+        assert!(pending_urls(content).is_empty());
+        // Totally empty input.
+        assert!(pending_urls("").is_empty());
+        // A pending line with no URL yields nothing.
+        assert!(pending_urls("- [ ] no url here\n").is_empty());
+    }
+
+    #[test]
+    fn pending_urls_matches_real_pipeline_shape() {
+        // Mirrors the real pipeline.md: `- [x]` items live under `## Pendientes`.
+        // The extractor must scan by checkbox state, not section position.
+        let content = "\
+# Pipeline
+
+## Pendientes
+- [x] #398 | https://jobs.lever.co/mistral/abc | Mistral | role | 3.3/5 | PDF ❌
+- [ ] https://job-boards.greenhouse.io/anthropic/jobs/5026187008 | Anthropic | Lead
+- [x] #347 | https://job-boards.greenhouse.io/anthropic/jobs/9999 | Anthropic | done
+";
+        let urls = pending_urls(content);
+        assert_eq!(
+            urls,
+            vec!["https://job-boards.greenhouse.io/anthropic/jobs/5026187008"]
+        );
+    }
+
     // ---- handlers ----
 
     #[test]
@@ -933,10 +1217,12 @@ mod tests {
         let root = make_repo_with_apps(tmp.path(), "x", true);
         let resp = handle(Command::GetConfig, &app_paths(root.clone()), tmp.path()).unwrap();
         match resp {
-            CommandResponse::Config { root: r, firecrawl } => {
+            CommandResponse::Config { root: r, firecrawl, eval_model } => {
                 assert_eq!(r, root.to_string_lossy());
                 assert!(firecrawl.dormant);
                 assert_eq!(firecrawl.keys, 0);
+                // No config.json under the base → default model.
+                assert_eq!(eval_model, crate::paths::DEFAULT_EVAL_MODEL);
             }
             other => panic!("expected Config, got {other:?}"),
         }
@@ -987,6 +1273,7 @@ mod tests {
         let config = CommandResponse::Config {
             root: "/Users/example/career-ops".into(),
             firecrawl: FirecrawlStatusDto::dormant(),
+            eval_model: crate::paths::DEFAULT_EVAL_MODEL.into(),
         };
         let error = CommandError::new(ErrorCode::NotFound, "applications.md not found");
 

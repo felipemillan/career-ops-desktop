@@ -44,6 +44,35 @@ pub fn save_config(config_base: &Path, root: &str) -> Result<(), CommandError> {
         ));
     }
 
+    // Merge into the existing config so other keys (e.g. `evalModel`) survive.
+    let mut cfg = read_existing_config(config_base);
+    cfg.career_ops_root = Some(root_trimmed.to_string());
+    write_config(config_base, &cfg)
+}
+
+/// Persist the eval model token into `config.json`, merging with existing keys so
+/// `careerOpsRoot` is never clobbered. The atomic-write machinery is shared with
+/// [`save_config`]. Validation of the token is the caller's responsibility
+/// (`validate::validate_eval_model`).
+pub fn save_eval_model(config_base: &Path, model: &str) -> Result<(), CommandError> {
+    let mut cfg = read_existing_config(config_base);
+    cfg.eval_model = Some(model.to_string());
+    write_config(config_base, &cfg)
+}
+
+/// Read the existing `config.json` (under `config_base`), returning a default
+/// (all-`None`) config when it is absent or unparseable. A read, not a write.
+fn read_existing_config(config_base: &Path) -> AppConfig {
+    paths::read_app_config(config_base)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// Atomically write `cfg` to `config.json` under `config_base` (temp + rename).
+/// The single sanctioned config writer; both [`save_config`] and
+/// [`save_eval_model`] route through here.
+fn write_config(config_base: &Path, cfg: &AppConfig) -> Result<(), CommandError> {
     let cfg_dir = paths::app_config_dir(config_base);
     std::fs::create_dir_all(&cfg_dir).map_err(|e| {
         CommandError::new(
@@ -52,10 +81,7 @@ pub fn save_config(config_base: &Path, root: &str) -> Result<(), CommandError> {
         )
     })?;
 
-    let cfg = AppConfig {
-        career_ops_root: Some(root_trimmed.to_string()),
-    };
-    let serialized = serde_json::to_string_pretty(&cfg).map_err(|e| {
+    let serialized = serde_json::to_string_pretty(cfg).map_err(|e| {
         CommandError::new(ErrorCode::Internal, format!("failed to serialize config: {e}"))
     })?;
 
@@ -616,6 +642,40 @@ mod tests {
         // paths.rs can read it back.
         let cfg = paths::read_app_config(&base).unwrap().unwrap();
         assert_eq!(cfg.career_ops_root.as_deref(), Some(repo.to_str().unwrap()));
+    }
+
+    #[test]
+    fn save_eval_model_writes_and_reads_back() {
+        let tmp = tempdir().unwrap();
+        let base = tmp.path().join("cfgbase");
+
+        // Default before any write.
+        assert_eq!(paths::read_eval_model(&base), paths::DEFAULT_EVAL_MODEL);
+
+        save_eval_model(&base, "claude-opus-4-8").unwrap();
+        assert_eq!(paths::read_eval_model(&base), "claude-opus-4-8");
+
+        let cfg = paths::read_app_config(&base).unwrap().unwrap();
+        assert_eq!(cfg.eval_model.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    #[test]
+    fn save_eval_model_preserves_root_and_vice_versa() {
+        let tmp = tempdir().unwrap();
+        let repo = make_valid_repo(tmp.path());
+        let base = tmp.path().join("cfgbase");
+
+        // root first, then model: both survive.
+        save_config(&base, repo.to_str().unwrap()).unwrap();
+        save_eval_model(&base, "gpt-4.1").unwrap();
+        let cfg = paths::read_app_config(&base).unwrap().unwrap();
+        assert_eq!(cfg.career_ops_root.as_deref(), Some(repo.to_str().unwrap()));
+        assert_eq!(cfg.eval_model.as_deref(), Some("gpt-4.1"));
+
+        // Re-saving the root must NOT clobber the model.
+        save_config(&base, repo.to_str().unwrap()).unwrap();
+        let cfg2 = paths::read_app_config(&base).unwrap().unwrap();
+        assert_eq!(cfg2.eval_model.as_deref(), Some("gpt-4.1"), "model survives root re-save");
     }
 
     #[test]

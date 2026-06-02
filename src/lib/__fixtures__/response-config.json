@@ -6,5 +6,6 @@
     "cooling_down": 0,
     "queue_len": 0,
     "dormant": true
-  }
+  },
+  "eval_model": "claude-sonnet-4-6"
 }

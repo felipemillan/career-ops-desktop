@@ -41,6 +41,26 @@ pub struct AppConfig {
     /// Persisted repo root chosen by the user (tier 2).
     #[serde(rename = "careerOpsRoot", skip_serializing_if = "Option::is_none")]
     pub career_ops_root: Option<String>,
+    /// Persisted eval model token (e.g. `claude-sonnet-4-6`). Absent → default.
+    #[serde(rename = "evalModel", skip_serializing_if = "Option::is_none")]
+    pub eval_model: Option<String>,
+}
+
+/// The default eval model used when `config.json` has no `evalModel` key.
+pub const DEFAULT_EVAL_MODEL: &str = "claude-sonnet-4-6";
+
+/// Read the configured eval model from `config.json` under `base`, defaulting to
+/// [`DEFAULT_EVAL_MODEL`] when the file is absent, unparseable, or has no
+/// `evalModel` key. This is a read (never a write), so it lives outside the
+/// sanctioned-write module.
+pub fn read_eval_model(base: &Path) -> String {
+    match read_app_config(base) {
+        Ok(Some(cfg)) => cfg
+            .eval_model
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_EVAL_MODEL.to_string()),
+        _ => DEFAULT_EVAL_MODEL.to_string(),
+    }
 }
 
 /// Shared application state holding the resolved repo root.
@@ -279,6 +299,7 @@ mod tests {
         fs::create_dir_all(&cfg_dir).unwrap();
         let cfg = AppConfig {
             career_ops_root: Some(cfg_root.to_str().unwrap().to_string()),
+            eval_model: None,
         };
         fs::write(
             app_config_path(&base),
@@ -305,6 +326,7 @@ mod tests {
         fs::create_dir_all(&bogus).unwrap();
         let cfg = AppConfig {
             career_ops_root: Some(bogus.to_str().unwrap().to_string()),
+            eval_model: None,
         };
         fs::write(
             app_config_path(&base),
@@ -322,6 +344,38 @@ mod tests {
             resolved.canonicalize().unwrap(),
             tmp.path().join("career-ops").canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn read_eval_model_defaults_when_absent_or_empty() {
+        let tmp = tempdir().unwrap();
+        // No config.json → default.
+        assert_eq!(read_eval_model(tmp.path()), DEFAULT_EVAL_MODEL);
+
+        // config.json present but no evalModel key → default.
+        let base = tmp.path().join("cfgbase");
+        let cfg_dir = app_config_dir(&base);
+        fs::create_dir_all(&cfg_dir).unwrap();
+        fs::write(app_config_path(&base), r#"{"careerOpsRoot":"/x"}"#).unwrap();
+        assert_eq!(read_eval_model(&base), DEFAULT_EVAL_MODEL);
+
+        // Present-but-empty evalModel → default.
+        fs::write(app_config_path(&base), r#"{"evalModel":"  "}"#).unwrap();
+        assert_eq!(read_eval_model(&base), DEFAULT_EVAL_MODEL);
+    }
+
+    #[test]
+    fn read_eval_model_returns_persisted_value() {
+        let tmp = tempdir().unwrap();
+        let base = tmp.path().join("cfgbase");
+        let cfg_dir = app_config_dir(&base);
+        fs::create_dir_all(&cfg_dir).unwrap();
+        fs::write(
+            app_config_path(&base),
+            r#"{"careerOpsRoot":"/x","evalModel":"claude-opus-4-8"}"#,
+        )
+        .unwrap();
+        assert_eq!(read_eval_model(&base), "claude-opus-4-8");
     }
 
     #[test]

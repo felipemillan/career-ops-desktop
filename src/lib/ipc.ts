@@ -60,7 +60,9 @@ export type Cmd =
   | { cmd: 'firecrawl_status' }
   | { cmd: 'firecrawl_enqueue'; urls: string[] }
   | { cmd: 'queue_url'; url: string }
-  | ({ cmd: 'update_status'; app_number: number; status: CanonicalStatus } & { notes?: string });
+  | ({ cmd: 'update_status'; app_number: number; status: CanonicalStatus } & { notes?: string })
+  | { cmd: 'set_eval_model'; model: string }
+  | { cmd: 'evaluate_all' };
 
 // ---------------------------------------------------------------------------
 // CommandResponse (externally tagged, snake_case kind values)
@@ -68,7 +70,7 @@ export type Cmd =
 
 export type CommandResponse =
   | { kind: 'text'; content: string }
-  | { kind: 'config'; root: string; firecrawl: FirecrawlStatusDto }
+  | { kind: 'config'; root: string; firecrawl: FirecrawlStatusDto; eval_model: string }
   | { kind: 'reports'; items: ReportMeta[] }
   | { kind: 'job_started'; job_id: string }
   | { kind: 'bool'; value: boolean }
@@ -199,6 +201,14 @@ export function cancelJob(jobId: string): Promise<Extract<CommandResponse, { kin
 
 export function evaluateUrl(url: string): Promise<Extract<CommandResponse, { kind: 'job_started' }>> {
   return dispatch<Extract<CommandResponse, { kind: 'job_started' }>>({ cmd: 'evaluate_url', url });
+}
+
+export function setEvalModel(model: string): Promise<Extract<CommandResponse, { kind: 'write_ok' }>> {
+  return dispatch<Extract<CommandResponse, { kind: 'write_ok' }>>({ cmd: 'set_eval_model', model });
+}
+
+export function evaluateAll(): Promise<Extract<CommandResponse, { kind: 'job_started' }>> {
+  return dispatch<Extract<CommandResponse, { kind: 'job_started' }>>({ cmd: 'evaluate_all' });
 }
 
 // -- Firecrawl --

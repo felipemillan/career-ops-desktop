@@ -262,6 +262,11 @@ pub fn handle(
             writes::save_config(config_base, &root)?;
             Ok(CommandResponse::WriteOk { duplicate: false })
         }
+        // --- Phase 2: additional reads ---
+        Command::ReadPipeline => read_pipeline(app_paths),
+        Command::ReadScanHistory => read_scan_history(app_paths),
+        Command::ListReports => list_reports(app_paths),
+        Command::ReadReport { id } => read_report(app_paths, &id),
         // Everything else is declared but not implemented in Phase 1.
         _ => Err(CommandError::not_implemented()),
     }
@@ -292,6 +297,199 @@ fn get_config(app_paths: &AppPaths) -> Result<CommandResponse, CommandError> {
         root: app_paths.root.to_string_lossy().into_owned(),
         firecrawl: FirecrawlStatusDto::dormant(),
     })
+}
+
+/// Read a UTF-8-lossy file at `path`. A missing file is **not** an error — it
+/// yields an empty `Text` response, matching the read-only viewer's contract
+/// that pipeline/scan tabs render an empty state rather than a hard failure.
+fn read_optional_text(path: &Path) -> Result<CommandResponse, CommandError> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(CommandResponse::Text {
+            content: String::from_utf8_lossy(&bytes).into_owned(),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(CommandResponse::Text { content: String::new() })
+        }
+        Err(e) => Err(CommandError::new(
+            ErrorCode::Internal,
+            format!("failed to read {}: {e}", path.display()),
+        )),
+    }
+}
+
+/// `ReadPipeline`: read `data/pipeline.md` (fallback root-level). Missing file →
+/// empty `Text` (not an error).
+fn read_pipeline(app_paths: &AppPaths) -> Result<CommandResponse, CommandError> {
+    read_optional_text(&app_paths.pipeline_md())
+}
+
+/// `ReadScanHistory`: read `data/scan-history.tsv` (fallback root-level).
+/// Missing file → empty `Text` (not an error).
+fn read_scan_history(app_paths: &AppPaths) -> Result<CommandResponse, CommandError> {
+    read_optional_text(&app_paths.scan_history_tsv())
+}
+
+/// True iff `name` matches the canonical report filename shape
+/// `{###}-{slug}-{YYYY-MM-DD}.md` (slug = lowercase alphanumerics + hyphens).
+fn is_report_filename(name: &str) -> bool {
+    matches_report_id(name.strip_suffix(".md").unwrap_or(""))
+}
+
+/// True iff `id` matches `^\d{3}-[a-z0-9-]+-\d{4}-\d{2}-\d{2}$`.
+///
+/// Hand-rolled (no regex dependency): three leading digits, a hyphen, a slug of
+/// `[a-z0-9-]+`, then `-YYYY-MM-DD`. The slug is greedy but the trailing
+/// `-\d{4}-\d{2}-\d{2}` is pinned to the end, so the date shape is enforced.
+fn matches_report_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    // Minimal length: 3 digits + '-' + 1 slug char + "-YYYY-MM-DD" (11) = 16.
+    if bytes.len() < 16 {
+        return false;
+    }
+    // Leading three digits.
+    if !bytes[0..3].iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    if bytes[3] != b'-' {
+        return false;
+    }
+    // Trailing date: "-YYYY-MM-DD" occupies the last 11 bytes.
+    let date = &bytes[bytes.len() - 11..];
+    let date_ok = date[0] == b'-'
+        && date[1..5].iter().all(u8::is_ascii_digit)
+        && date[5] == b'-'
+        && date[6..8].iter().all(u8::is_ascii_digit)
+        && date[8] == b'-'
+        && date[9..11].iter().all(u8::is_ascii_digit);
+    if !date_ok {
+        return false;
+    }
+    // Slug: everything between the leading "ddd-" and the trailing date.
+    let slug = &bytes[4..bytes.len() - 11];
+    if slug.is_empty() {
+        return false;
+    }
+    slug.iter()
+        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// `ListReports`: list `reports/*.md` matching the canonical filename pattern,
+/// returning `{id, filename}` per entry sorted DESCENDING by filename.
+/// Non-matching files (`.DS_Store`, `README.md`, …) are silently skipped. A
+/// missing `reports/` dir yields an empty list (not an error).
+fn list_reports(app_paths: &AppPaths) -> Result<CommandResponse, CommandError> {
+    let dir = app_paths.reports_dir();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CommandResponse::Reports { items: Vec::new() });
+        }
+        Err(e) => {
+            return Err(CommandError::new(
+                ErrorCode::Internal,
+                format!("failed to list reports at {}: {e}", dir.display()),
+            ));
+        }
+    };
+
+    let mut items: Vec<ReportMeta> = Vec::new();
+    for entry in entries.flatten() {
+        let filename = match entry.file_name().into_string() {
+            Ok(name) => name,
+            Err(_) => continue, // non-UTF-8 filename → skip silently
+        };
+        if !is_report_filename(&filename) {
+            continue;
+        }
+        let id = filename
+            .strip_suffix(".md")
+            .unwrap_or(&filename)
+            .to_string();
+        items.push(ReportMeta { id, filename });
+    }
+
+    // Sort DESCENDING by filename.
+    items.sort_by(|a, b| b.filename.cmp(&a.filename));
+
+    Ok(CommandResponse::Reports { items })
+}
+
+/// `ReadReport { id }`: SECURITY-CRITICAL. Validate `id` against the report-id
+/// regex, resolve `reports/{id}.md`, and assert the resolved path is contained
+/// within the canonicalized reports directory (blocking `../` traversal). The
+/// reports *directory* is canonicalized (it exists); the file may not, so it is
+/// never canonicalized directly. Missing file → `NotFound`.
+fn read_report(app_paths: &AppPaths, id: &str) -> Result<CommandResponse, CommandError> {
+    // 1. Validate the id shape. This alone rejects `../`, `/`, and bad dates,
+    //    but containment below is the load-bearing security check.
+    if !matches_report_id(id) {
+        return Err(CommandError::new(
+            ErrorCode::InvalidArg,
+            format!("invalid report id: {id:?}"),
+        ));
+    }
+
+    let reports_dir = app_paths.reports_dir();
+
+    // 2. Canonicalize the DIRECTORY (it must exist). If it doesn't, there are
+    //    no reports to read → NotFound.
+    let canonical_dir = match reports_dir.canonicalize() {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CommandError::new(
+                ErrorCode::NotFound,
+                format!("report not found: {id}"),
+            ));
+        }
+        Err(e) => {
+            return Err(CommandError::new(
+                ErrorCode::Internal,
+                format!("failed to resolve reports dir: {e}"),
+            ));
+        }
+    };
+
+    // 3. Resolve the target file under the canonical dir and assert prefix
+    //    containment. The id is regex-validated to a single path segment, so the
+    //    join cannot introduce `..`; this is a defense-in-depth assertion.
+    let target = canonical_dir.join(format!("{id}.md"));
+    if !target.starts_with(&canonical_dir) {
+        return Err(CommandError::new(
+            ErrorCode::InvalidArg,
+            format!("report id escapes reports directory: {id:?}"),
+        ));
+    }
+
+    // 4. If the file exists, canonicalize it and re-assert containment so a
+    //    symlink inside reports/ pointing outside the dir is rejected even
+    //    though the id passed the regex. A missing file → NotFound.
+    match target.canonicalize() {
+        Ok(canonical_target) => {
+            if !canonical_target.starts_with(&canonical_dir) {
+                return Err(CommandError::new(
+                    ErrorCode::InvalidArg,
+                    format!("report id escapes reports directory: {id:?}"),
+                ));
+            }
+            match std::fs::read(&canonical_target) {
+                Ok(bytes) => Ok(CommandResponse::Text {
+                    content: String::from_utf8_lossy(&bytes).into_owned(),
+                }),
+                Err(e) => Err(CommandError::new(
+                    ErrorCode::Internal,
+                    format!("failed to read report {id}: {e}"),
+                )),
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(CommandError::new(
+            ErrorCode::NotFound,
+            format!("report not found: {id}"),
+        )),
+        Err(e) => Err(CommandError::new(
+            ErrorCode::Internal,
+            format!("failed to resolve report {id}: {e}"),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -539,5 +737,305 @@ mod tests {
     fn write_golden<T: Serialize>(path: &Path, value: &T) {
         let json = serde_json::to_string_pretty(value).unwrap();
         fs::write(path, format!("{json}\n")).unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 tests (P2-T12): containment + id regex + empty-file + listing.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod p2_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    /// Build a repo root with a `reports/` dir and the given report files.
+    fn make_repo_with_reports(parent: &Path, files: &[(&str, &str)]) -> PathBuf {
+        let root = parent.join("repo");
+        let reports = root.join("reports");
+        fs::create_dir_all(&reports).expect("create reports dir");
+        for (name, body) in files {
+            fs::write(reports.join(name), body).expect("write report");
+        }
+        root
+    }
+
+    fn app_paths(root: PathBuf) -> AppPaths {
+        AppPaths { root }
+    }
+
+    fn text_of(resp: CommandResponse) -> String {
+        match resp {
+            CommandResponse::Text { content } => content,
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    // ---- read_report: ~10 valid ids resolve inside reports/ ----
+
+    #[test]
+    fn read_report_valid_ids_resolve_inside_reports() {
+        let tmp = tempdir().unwrap();
+        let valid_ids = [
+            "001-acme-2026-01-01",
+            "042-getyourguide-2026-06-01",
+            "100-some-long-company-name-2025-12-31",
+            "468-cohere-ai-2026-02-28",
+            "007-x-2024-03-15",
+            "999-a1b2c3-2023-11-09",
+            "250-data-eng-co-2026-04-30",
+            "300-foo-bar-baz-2026-05-20",
+            "123-acme2-2026-07-04",
+            "555-multi-word-slug-here-2026-08-08",
+        ];
+        let files: Vec<(String, &str)> = valid_ids
+            .iter()
+            .map(|id| (format!("{id}.md"), "# report body"))
+            .collect();
+        let refs: Vec<(&str, &str)> =
+            files.iter().map(|(n, b)| (n.as_str(), *b)).collect();
+        let root = make_repo_with_reports(tmp.path(), &refs);
+        let paths = app_paths(root);
+
+        for id in valid_ids {
+            let resp = read_report(&paths, id)
+                .unwrap_or_else(|e| panic!("valid id {id} should resolve, got {e:?}"));
+            assert_eq!(text_of(resp), "# report body", "body mismatch for {id}");
+        }
+    }
+
+    // ---- read_report: ~8 invalid ids → InvalidArg ----
+
+    #[test]
+    fn read_report_invalid_ids_rejected_as_invalid_arg() {
+        let tmp = tempdir().unwrap();
+        // A populated reports dir so failures are about the id, not a missing dir.
+        let root = make_repo_with_reports(
+            tmp.path(),
+            &[("001-acme-2026-01-01.md", "x")],
+        );
+        let paths = app_paths(root);
+
+        let invalid_ids = [
+            "../../etc/passwd",              // traversal
+            "../001-acme-2026-01-01",        // traversal prefix
+            "001-acme-2026-1-1",             // wrong date shape (single digits)
+            "01-acme-2026-01-01",            // only two leading digits
+            "abc-acme-2026-01-01",           // non-digit prefix
+            "001-Acme-2026-01-01",           // uppercase in slug
+            "001-acme-2026-13",              // truncated / wrong date
+            "001--2026-01-01",               // empty slug
+            "001-acme-2026-01-01/../secret", // embedded traversal
+        ];
+
+        for id in invalid_ids {
+            let err = read_report(&paths, id)
+                .expect_err(&format!("id {id:?} must be rejected"));
+            assert_eq!(
+                err.code,
+                ErrorCode::InvalidArg,
+                "id {id:?} should be InvalidArg, got {err:?}"
+            );
+        }
+    }
+
+    // ---- read_report: regex-valid id whose resolved path escapes is rejected ----
+
+    #[cfg(unix)]
+    #[test]
+    fn read_report_symlink_escape_is_rejected_even_when_regex_valid() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().unwrap();
+        // Secret outside the reports dir.
+        let secret = tmp.path().join("secret.md");
+        fs::write(&secret, "TOP SECRET").unwrap();
+
+        let root = make_repo_with_reports(tmp.path(), &[]);
+        let reports = root.join("reports");
+        // A regex-valid filename that is actually a symlink pointing outside.
+        let id = "001-escape-2026-01-01";
+        symlink(&secret, reports.join(format!("{id}.md"))).unwrap();
+
+        let paths = app_paths(root);
+        let err = read_report(&paths, id).expect_err("symlink escape must be rejected");
+        assert_eq!(err.code, ErrorCode::InvalidArg);
+    }
+
+    #[test]
+    fn read_report_missing_file_is_not_found() {
+        let tmp = tempdir().unwrap();
+        let root = make_repo_with_reports(tmp.path(), &[("001-acme-2026-01-01.md", "x")]);
+        let paths = app_paths(root);
+        // Regex-valid id, but no such file.
+        let err = read_report(&paths, "002-ghost-2026-01-01").unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn read_report_missing_reports_dir_is_not_found() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("repo-no-reports");
+        fs::create_dir_all(&root).unwrap();
+        let paths = app_paths(root);
+        let err = read_report(&paths, "001-acme-2026-01-01").unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
+    }
+
+    // ---- list_reports: filters junk, sorted descending ----
+
+    #[test]
+    fn list_reports_filters_and_sorts_descending() {
+        let tmp = tempdir().unwrap();
+        let root = make_repo_with_reports(
+            tmp.path(),
+            &[
+                ("001-acme-2026-01-01.md", "a"),
+                ("042-getyourguide-2026-06-01.md", "b"),
+                ("100-cohere-2026-03-15.md", "c"),
+                (".DS_Store", "junk"),
+                ("README.md", "# readme"),
+                ("notes.md", "not a report"),
+                ("draft.txt", "x"),
+            ],
+        );
+        let paths = app_paths(root);
+
+        let resp = list_reports(&paths).unwrap();
+        let items = match resp {
+            CommandResponse::Reports { items } => items,
+            other => panic!("expected Reports, got {other:?}"),
+        };
+
+        // Only the three canonical reports survive.
+        assert_eq!(items.len(), 3, "junk and non-report files must be skipped");
+        let filenames: Vec<&str> = items.iter().map(|m| m.filename.as_str()).collect();
+        assert!(!filenames.contains(&".DS_Store"));
+        assert!(!filenames.contains(&"README.md"));
+        assert!(!filenames.contains(&"notes.md"));
+
+        // Sorted DESCENDING by filename.
+        assert_eq!(items[0].filename, "100-cohere-2026-03-15.md");
+        assert_eq!(items[1].filename, "042-getyourguide-2026-06-01.md");
+        assert_eq!(items[2].filename, "001-acme-2026-01-01.md");
+
+        // id == filename without ".md".
+        assert_eq!(items[0].id, "100-cohere-2026-03-15");
+    }
+
+    #[test]
+    fn list_reports_missing_dir_is_empty_list() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("repo-no-reports");
+        fs::create_dir_all(&root).unwrap();
+        let paths = app_paths(root);
+        let resp = list_reports(&paths).unwrap();
+        match resp {
+            CommandResponse::Reports { items } => assert!(items.is_empty()),
+            other => panic!("expected empty Reports, got {other:?}"),
+        }
+    }
+
+    // ---- read_pipeline / read_scan_history: missing → empty Text ----
+
+    #[test]
+    fn read_pipeline_missing_is_empty_text_not_error() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("repo-empty");
+        fs::create_dir_all(&root).unwrap();
+        let paths = app_paths(root);
+        let resp = read_pipeline(&paths).expect("missing pipeline must not error");
+        assert_eq!(text_of(resp), "");
+    }
+
+    #[test]
+    fn read_pipeline_data_dir_then_root_fallback() {
+        // data/ variant.
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        fs::create_dir_all(root.join("data")).unwrap();
+        fs::write(root.join("data").join("pipeline.md"), "DATA PIPE\n").unwrap();
+        let resp = read_pipeline(&app_paths(root)).unwrap();
+        assert_eq!(text_of(resp), "DATA PIPE\n");
+
+        // root-level fallback.
+        let tmp2 = tempdir().unwrap();
+        let root2 = tmp2.path().join("repo2");
+        fs::create_dir_all(&root2).unwrap();
+        fs::write(root2.join("pipeline.md"), "ROOT PIPE\n").unwrap();
+        let resp2 = read_pipeline(&app_paths(root2)).unwrap();
+        assert_eq!(text_of(resp2), "ROOT PIPE\n");
+    }
+
+    #[test]
+    fn read_scan_history_missing_is_empty_text_not_error() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("repo-empty");
+        fs::create_dir_all(&root).unwrap();
+        let paths = app_paths(root);
+        let resp = read_scan_history(&paths).expect("missing scan history must not error");
+        assert_eq!(text_of(resp), "");
+    }
+
+    #[test]
+    fn read_scan_history_reads_data_dir_content() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        fs::create_dir_all(root.join("data")).unwrap();
+        fs::write(
+            root.join("data").join("scan-history.tsv"),
+            "url\tportal\ncol\n",
+        )
+        .unwrap();
+        let resp = read_scan_history(&app_paths(root)).unwrap();
+        assert_eq!(text_of(resp), "url\tportal\ncol\n");
+    }
+
+    // ---- via the dispatch `handle` entry point ----
+
+    #[test]
+    fn handle_routes_phase2_reads() {
+        let tmp = tempdir().unwrap();
+        let root = make_repo_with_reports(tmp.path(), &[("001-acme-2026-01-01.md", "body")]);
+        let paths = app_paths(root);
+        let base = tmp.path();
+
+        // ReadReport via handle.
+        let resp = handle(
+            Command::ReadReport {
+                id: "001-acme-2026-01-01".into(),
+            },
+            &paths,
+            base,
+        )
+        .unwrap();
+        assert_eq!(text_of(resp), "body");
+
+        // ListReports via handle.
+        let resp = handle(Command::ListReports, &paths, base).unwrap();
+        assert!(matches!(resp, CommandResponse::Reports { .. }));
+
+        // ReadPipeline (missing) via handle → empty Text.
+        let resp = handle(Command::ReadPipeline, &paths, base).unwrap();
+        assert_eq!(text_of(resp), "");
+    }
+
+    // ---- unit coverage of the id matcher ----
+
+    #[test]
+    fn matches_report_id_unit() {
+        assert!(matches_report_id("001-acme-2026-01-01"));
+        assert!(matches_report_id("468-multi-word-slug-2026-12-31"));
+        assert!(!matches_report_id("01-acme-2026-01-01"));
+        assert!(!matches_report_id("001-Acme-2026-01-01"));
+        assert!(!matches_report_id("001--2026-01-01"));
+        assert!(!matches_report_id("../../etc/passwd"));
+        assert!(!matches_report_id("001-acme-2026-1-1"));
+        assert!(!matches_report_id(""));
+        assert!(is_report_filename("001-acme-2026-01-01.md"));
+        assert!(!is_report_filename("README.md"));
+        assert!(!is_report_filename("001-acme-2026-01-01")); // no .md
     }
 }

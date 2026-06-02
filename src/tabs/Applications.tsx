@@ -2,12 +2,55 @@
  * Applications.tsx — Live sortable grid of job applications.
  * Uses useApplications() from store.ts (which calls readApplications() via ipc.ts).
  * Does NOT import invoke or node:fs directly.
+ *
+ * Phase 2: adds Table / Kanban view toggle.
  */
+import { useState } from "react";
 import { type ColumnDef } from "@tanstack/react-table";
 import type { CareerApplication } from "../lib/types";
 import { useApplications } from "../lib/store";
 import { DataTable } from "../components/DataTable";
 import { RepoPicker } from "../components/RepoPicker";
+import { ApplicationsKanban } from "../components/kanban/ApplicationsKanban";
+
+// ---------------------------------------------------------------------------
+// View toggle
+// ---------------------------------------------------------------------------
+
+type ViewMode = "table" | "kanban";
+
+function ViewToggle({
+  active,
+  onChange,
+}: {
+  active: ViewMode;
+  onChange: (v: ViewMode) => void;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label="View mode"
+      className="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden text-xs font-medium"
+    >
+      {(["table", "kanban"] as ViewMode[]).map((mode) => (
+        <button
+          key={mode}
+          type="button"
+          onClick={() => onChange(mode)}
+          aria-pressed={active === mode}
+          className={[
+            "px-3 py-1.5 capitalize transition-colors",
+            active === mode
+              ? "bg-gray-900 text-white dark:bg-white dark:text-gray-900"
+              : "bg-white text-gray-600 hover:bg-gray-50 dark:bg-gray-900 dark:text-gray-400 dark:hover:bg-gray-800",
+          ].join(" ")}
+        >
+          {mode === "table" ? "⊞ Table" : "⧉ Kanban"}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Column definitions
@@ -139,6 +182,7 @@ const columns: ColumnDef<CareerApplication, unknown>[] = [
 
 export function Applications() {
   const { apps, loading, error } = useApplications();
+  const [viewMode, setViewMode] = useState<ViewMode>("table");
 
   // Parse the error code from the CommandError message / thrown value.
   // The store stores err.message as a string; CommandError objects are thrown
@@ -216,19 +260,25 @@ export function Applications() {
     );
   }
 
-  // Loaded — show the grid
+  // Loaded — show table or kanban
   return (
     <div className="flex flex-col gap-3 h-full">
       <div className="flex items-center justify-between">
         <p className="text-xs text-gray-400 dark:text-gray-500">
           {apps.length} application{apps.length !== 1 ? "s" : ""}
         </p>
+        <ViewToggle active={viewMode} onChange={setViewMode} />
       </div>
-      <DataTable
-        columns={columns}
-        data={apps}
-        defaultSorting={[{ id: "number", desc: true }]}
-      />
+
+      {viewMode === "table" ? (
+        <DataTable
+          columns={columns}
+          data={apps}
+          defaultSorting={[{ id: "number", desc: true }]}
+        />
+      ) : (
+        <ApplicationsKanban apps={apps} />
+      )}
     </div>
   );
 }

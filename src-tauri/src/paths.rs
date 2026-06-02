@@ -56,6 +56,36 @@ impl AppPaths {
     pub fn applications_md(&self) -> PathBuf {
         applications_md_path(&self.root)
     }
+
+    /// Path to `pipeline.md`, preferring `data/pipeline.md`, falling back to the
+    /// root-level file.
+    pub fn pipeline_md(&self) -> PathBuf {
+        preferred_data_path(&self.root, "pipeline.md")
+    }
+
+    /// Path to `scan-history.tsv`, preferring `data/scan-history.tsv`, falling
+    /// back to the root-level file.
+    pub fn scan_history_tsv(&self) -> PathBuf {
+        preferred_data_path(&self.root, "scan-history.tsv")
+    }
+
+    /// The `reports/` directory under the repo root.
+    pub fn reports_dir(&self) -> PathBuf {
+        self.root.join("reports")
+    }
+}
+
+/// Returns the preferred path for `name` under `root`: `data/<name>` if that
+/// file exists, otherwise the root-level `<name>`. The returned path is the one
+/// the caller should read; when neither exists it points at the root-level path
+/// (so a missing-file read is reported against the more user-visible location).
+pub fn preferred_data_path(root: &Path, name: &str) -> PathBuf {
+    let nested = root.join("data").join(name);
+    if nested.is_file() {
+        nested
+    } else {
+        root.join(name)
+    }
 }
 
 /// Returns the preferred `applications.md` path under `root`:

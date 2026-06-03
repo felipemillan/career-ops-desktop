@@ -230,6 +230,8 @@ pub enum CommandResponse {
     /// The resolved config: repo root + firecrawl status + eval model.
     Config {
         root: String,
+        /// True when `root` actually contains applications.md (repo is set up).
+        root_valid: bool,
         firecrawl: FirecrawlStatusDto,
         eval_model: String,
     },
@@ -322,6 +324,7 @@ fn read_applications(app_paths: &AppPaths) -> Result<CommandResponse, CommandErr
 fn get_config(app_paths: &AppPaths, config_base: &Path) -> Result<CommandResponse, CommandError> {
     Ok(CommandResponse::Config {
         root: app_paths.root.to_string_lossy().into_owned(),
+        root_valid: crate::paths::is_valid_root(&app_paths.root),
         firecrawl: FirecrawlStatusDto::dormant(),
         eval_model: crate::paths::read_eval_model(config_base),
     })
@@ -1029,6 +1032,7 @@ mod tests {
     fn config_response_carries_eval_model() {
         let resp = CommandResponse::Config {
             root: "/x".into(),
+            root_valid: false,
             firecrawl: FirecrawlStatusDto::dormant(),
             eval_model: "claude-opus-4-8".into(),
         };
@@ -1231,7 +1235,7 @@ just a note, no checklist
         let root = make_repo_with_apps(tmp.path(), "x", true);
         let resp = handle(Command::GetConfig, &app_paths(root.clone()), tmp.path()).unwrap();
         match resp {
-            CommandResponse::Config { root: r, firecrawl, eval_model } => {
+            CommandResponse::Config { root: r, firecrawl, eval_model, root_valid: _ } => {
                 assert_eq!(r, root.to_string_lossy());
                 assert!(firecrawl.dormant);
                 assert_eq!(firecrawl.keys, 0);
@@ -1286,6 +1290,7 @@ just a note, no checklist
         };
         let config = CommandResponse::Config {
             root: "/Users/example/career-ops".into(),
+            root_valid: false,
             firecrawl: FirecrawlStatusDto::dormant(),
             eval_model: crate::paths::DEFAULT_EVAL_MODEL.into(),
         };

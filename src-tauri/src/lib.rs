@@ -40,6 +40,7 @@ fn resolve_startup_paths(config_base: &std::path::Path, default_base: &std::path
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             use tauri::Manager;
 

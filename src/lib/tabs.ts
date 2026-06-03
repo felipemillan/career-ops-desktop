@@ -8,7 +8,8 @@ export type TabId =
   | "reports"
   | "scan"
   | "analytics"
-  | "terminal";
+  | "terminal"
+  | "settings";
 
 export interface TabDef {
   id: TabId;
@@ -26,4 +27,5 @@ export const TABS: TabDef[] = [
   { id: "scan", label: "Scan History", shortcut: "4" },
   { id: "analytics", label: "Analytics", shortcut: "5" },
   { id: "terminal", label: "Terminal", shortcut: "6" },
+  { id: "settings", label: "Settings" },
 ];

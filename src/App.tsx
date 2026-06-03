@@ -4,6 +4,7 @@
  * All IPC goes through ipc.ts — never import invoke here.
  *
  * Phase 3 (P3-T5): ActionBar (global Lane-A toolbar) + ConsolePanel (bottom drawer).
+ * Phase 6: Onboarding gate (root_valid check) + Settings tab.
  */
 import { Suspense, lazy, useCallback, useEffect, useState } from "react";
 import "./App.css";
@@ -11,8 +12,10 @@ import { Sidebar } from "./components/Sidebar";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ActionBar } from "./components/ActionBar";
 import { ConsolePanel } from "./components/ConsolePanel";
+import { Onboarding } from "./components/Onboarding";
 import { TABS, type TabId } from "./lib/tabs";
 import { Applications } from "./tabs/Applications";
+import { getConfig } from "./lib/ipc";
 import { track } from "./lib/analytics";
 
 // Secondary tabs are lazy: their heavy deps (dnd-kit, react-markdown, charts)
@@ -33,6 +36,9 @@ const AnalyticsTab = lazy(() =>
 const TerminalTab = lazy(() =>
   import("./tabs/TerminalTab").then((m) => ({ default: m.TerminalTab })),
 );
+const SettingsTab = lazy(() =>
+  import("./tabs/SettingsTab").then((m) => ({ default: m.SettingsTab })),
+);
 
 function App() {
   const [active, setActive] = useState<TabId>("applications");
@@ -42,6 +48,21 @@ function App() {
   // Console drawer: null = closed, string = focus job_id (open)
   const [consoleJobId, setConsoleJobId] = useState<string | null>(null);
   const [consoleOpen, setConsoleOpen] = useState(false);
+
+  // Onboarding gate: null = checking, true = configured, false = not configured
+  const [configured, setConfigured] = useState<boolean | null>(null);
+
+  // On mount, check whether the repo is valid
+  useEffect(() => {
+    getConfig()
+      .then((res) => {
+        setConfigured(res.root_valid);
+      })
+      .catch(() => {
+        // Backend unavailable — treat as not configured so onboarding shows
+        setConfigured(false);
+      });
+  }, []);
 
   const handleJobStarted = useCallback((jobId: string) => {
     setConsoleJobId(jobId);
@@ -59,7 +80,7 @@ function App() {
     track('tab_viewed', { tab: id });
   };
 
-  // Cmd+1..6 shortcuts
+  // Cmd+1..7 shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!e.metaKey) return;
@@ -73,6 +94,20 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // --- Loading splash ---
+  if (configured === null) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-950">
+        <span className="text-sm text-gray-400 dark:text-gray-500">Loading…</span>
+      </div>
+    );
+  }
+
+  // --- Onboarding gate ---
+  if (!configured) {
+    return <Onboarding onConfigured={() => setConfigured(true)} />;
+  }
+
   const panes: Record<TabId, React.ReactNode> = {
     applications: <Applications />,
     pipeline: <PipelineTab />,
@@ -80,6 +115,7 @@ function App() {
     scan: <ScanTab />,
     analytics: <AnalyticsTab />,
     terminal: <TerminalTab />,
+    settings: <SettingsTab />,
   };
 
   return (

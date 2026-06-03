@@ -1,6 +1,7 @@
 {
   "kind": "config",
   "root": "/Users/example/career-ops",
+  "root_valid": false,
   "firecrawl": {
     "keys": 0,
     "cooling_down": 0,

@@ -70,7 +70,7 @@ export type Cmd =
 
 export type CommandResponse =
   | { kind: 'text'; content: string }
-  | { kind: 'config'; root: string; firecrawl: FirecrawlStatusDto; eval_model: string }
+  | { kind: 'config'; root: string; root_valid: boolean; firecrawl: FirecrawlStatusDto; eval_model: string }
   | { kind: 'reports'; items: ReportMeta[] }
   | { kind: 'job_started'; job_id: string }
   | { kind: 'bool'; value: boolean }
